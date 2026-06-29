@@ -10,6 +10,11 @@ func routes(_ app: Application) throws {
         "Hello, world!"
     }
 
+    // Convenience redirect so /docs (no trailing slash) reaches the Swagger UI.
+    app.get("docs") { req async -> Response in
+        req.redirect(to: "/docs/")
+    }
+
     try app.register(collection: AuthController())
     try app.register(collection: UserController())
     try app.register(collection: LabResultController())
