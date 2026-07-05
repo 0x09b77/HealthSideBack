@@ -5,8 +5,17 @@ import Vapor
 struct AuthController: RouteCollection {
     func boot(routes: any RoutesBuilder) throws {
         let auth = routes.grouped("auth")
-        auth.post("register", use: self.register)
-        auth.post("login", use: self.login)
+
+        // Throttle credential endpoints to blunt brute-force / enumeration.
+        // Limits are per client IP per minute; tune via env.
+        let window: TimeInterval = 60
+        let loginLimit = Environment.get("RATE_LIMIT_LOGIN").flatMap(Int.init) ?? 10
+        let registerLimit = Environment.get("RATE_LIMIT_REGISTER").flatMap(Int.init) ?? 10
+
+        auth.grouped(RateLimitMiddleware(limit: registerLimit, window: window, scope: "auth-register"))
+            .post("register", use: self.register)
+        auth.grouped(RateLimitMiddleware(limit: loginLimit, window: window, scope: "auth-login"))
+            .post("login", use: self.login)
         auth.post("refresh", use: self.refresh)
         auth.post("logout", use: self.logout)
     }

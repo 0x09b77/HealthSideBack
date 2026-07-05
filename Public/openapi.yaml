@@ -18,6 +18,8 @@ tags:
     description: Current user profile
   - name: Lab results
     description: Upload, list, download and delete lab-result files
+  - name: Documents
+    description: Extraction status and parsed document envelopes
 
 paths:
   /auth/register:
@@ -45,6 +47,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /auth/login:
     post:
@@ -69,6 +73,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /auth/refresh:
     post:
@@ -145,12 +151,12 @@ paths:
                   type: string
                   description: Optional human label, e.g. "Helix, April 2026"
       responses:
-        '201':
-          description: Uploaded
+        '202':
+          description: Accepted — file stored, queued for background extraction
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/LabResultResponse'
+                $ref: '#/components/schemas/UploadAcceptedResponse'
         '400':
           description: Empty or malformed file
           content:
@@ -158,8 +164,13 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Duplicate — this file (by checksum) was already uploaded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '413':
-          description: File exceeds the 20 MB limit
+          description: File exceeds the 20 MB limit, or image resolution exceeds 50 MP
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -214,6 +225,48 @@ paths:
       responses:
         '204':
           description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /documents:
+    get:
+      tags: [Documents]
+      summary: The caller's processing/extraction feed (newest first)
+      responses:
+        '200':
+          description: List of documents with status and (when done) the envelope
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /documents/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: The document id returned at upload (== lab-result id)
+    get:
+      tags: [Documents]
+      summary: Extraction status and (when done) the parsed envelope (owner only)
+      responses:
+        '200':
+          description: Document status and envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentView'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -292,6 +345,64 @@ components:
         label:
           type: string
           nullable: true
+        parseStatus:
+          $ref: '#/components/schemas/ParseStatus'
+        uploadedAt:
+          type: string
+          format: date-time
+          nullable: true
+    ParseStatus:
+      type: string
+      enum: [pending, processing, done, failed]
+      description: Extraction pipeline status of the file
+    UploadAcceptedResponse:
+      type: object
+      properties:
+        documentId:
+          type: string
+          format: uuid
+          description: Poll GET /documents/{id} with this
+        status:
+          $ref: '#/components/schemas/ParseStatus'
+    DocumentView:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ParseStatus'
+        originalFilename:
+          type: string
+        mimeType:
+          type: string
+        fileSize:
+          type: integer
+        label:
+          type: string
+          nullable: true
+        documentType:
+          type: string
+          enum: [lab_panel, imaging_report, consult_note, other]
+          nullable: true
+          description: null until extraction is done
+        reportDate:
+          type: string
+          format: date
+          nullable: true
+        provider:
+          type: string
+          nullable: true
+        summary:
+          type: string
+          nullable: true
+        diagnosis:
+          type: string
+          nullable: true
+        payloadJson:
+          type: object
+          nullable: true
+          description: Extraction envelope; null until done
         uploadedAt:
           type: string
           format: date-time
@@ -322,6 +433,16 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
     ValidationError:
       description: Request failed validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: Rate limit exceeded — retry after the period in the Retry-After header
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds to wait before retrying
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }

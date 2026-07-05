@@ -36,6 +36,22 @@ final class LabResult: Model, @unchecked Sendable {
     @OptionalField(key: "label")
     var label: String?
 
+    /// Extraction pipeline status (see R-Flow/System-Flow).
+    @Field(key: "parse_status")
+    var parseStatus: ParseStatus
+
+    /// Number of pages, for PDF/TIFF; optional.
+    @OptionalField(key: "page_count")
+    var pageCount: Int?
+
+    /// Storage key of a generated preview/thumbnail (future).
+    @OptionalField(key: "preview_key")
+    var previewKey: String?
+
+    /// Storage key of a normalized-for-extraction version (future).
+    @OptionalField(key: "normalized_key")
+    var normalizedKey: String?
+
     @Timestamp(key: "uploaded_at", on: .create)
     var uploadedAt: Date?
 
@@ -59,6 +75,7 @@ final class LabResult: Model, @unchecked Sendable {
         self.fileSize = fileSize
         self.checksumSha256 = checksumSha256
         self.label = label
+        self.parseStatus = .pending
     }
 
     func toResponse() throws -> LabResultResponse {
@@ -69,6 +86,7 @@ final class LabResult: Model, @unchecked Sendable {
             fileSize: self.fileSize,
             checksumSha256: self.checksumSha256,
             label: self.label,
+            parseStatus: self.parseStatus,
             uploadedAt: self.uploadedAt
         )
     }

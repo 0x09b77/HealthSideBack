@@ -36,18 +36,40 @@ struct LabResultController: RouteCollection {
             throw Abort(.unsupportedMediaType, reason: "Only PDF, JPEG, PNG and HEIC are accepted")
         }
 
-        let checksum = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        let storageKey = UUID().uuidString
+        // For images: cap declared resolution (decompression-bomb guard) and
+        // strip embedded metadata (EXIF carries GPS — a geolocation leak, doc §6).
+        var storedData = data
+        if type.isImage {
+            if let dims = ImageInspector.dimensions(of: data, type: type),
+               dims.width * dims.height > ImageInspector.maxPixels {
+                throw Abort(.payloadTooLarge, reason: "Image resolution exceeds the allowed limit")
+            }
+            storedData = ImageInspector.stripMetadata(from: data, type: type)
+        }
 
+        let checksum = SHA256.hash(data: storedData).map { String(format: "%02x", $0) }.joined()
+        let userID = try user.requireID()
+
+        // Dedup per user: the same file re-uploaded shouldn't be stored or
+        // parsed twice (doc R-Flow). Scoped to the user, so isolation holds.
+        let duplicate = try await LabResult.query(on: req.db)
+            .filter(\.$user.$id == userID)
+            .filter(\.$checksumSha256 == checksum)
+            .first()
+        if duplicate != nil {
+            throw Abort(.conflict, reason: "This file has already been uploaded")
+        }
+
+        let storageKey = UUID().uuidString
         let storage = req.fileStorage
-        try await storage.write(ByteBuffer(bytes: data), key: storageKey, on: req)
+        try await storage.write(ByteBuffer(bytes: storedData), key: storageKey, on: req)
 
         let result = LabResult(
-            userID: try user.requireID(),
+            userID: userID,
             originalFilename: Self.sanitizeFilename(file.filename),
             storageKey: storageKey,
             mimeType: type.mimeType,
-            fileSize: data.count,
+            fileSize: storedData.count,
             checksumSha256: checksum,
             label: payload.label
         )
@@ -60,7 +82,11 @@ struct LabResultController: RouteCollection {
             throw error
         }
 
-        return try await result.toResponse().encodeResponse(status: .created, for: req)
+        // Upload is async: the file is stored and marked pending; extraction runs
+        // in the background (worker — next phase). Client polls GET /documents/:id
+        // or waits for a push. `document_id` is the lab-result id (1─1 documents).
+        let accepted = UploadAcceptedResponse(documentId: try result.requireID(), status: result.parseStatus)
+        return try await accepted.encodeResponse(status: .accepted, for: req)
     }
 
     /// `GET /lab-results` — metadata of the current user's own results, newest first.
@@ -92,6 +118,10 @@ struct LabResultController: RouteCollection {
         // Force download instead of in-browser rendering — a defense against
         // active content (PDF JS, etc.) running in our origin.
         response.headers.contentDisposition = .init(.attachment, filename: result.originalFilename)
+        // Neutralize any active content if the file is opened, and keep medical
+        // bytes out of caches/proxies.
+        response.headers.replaceOrAdd(name: "Content-Security-Policy", value: "default-src 'none'")
+        response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store")
         return response
     }
 
