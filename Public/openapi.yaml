@@ -115,6 +115,40 @@ paths:
         '204':
           description: Token revoked (or already absent)
 
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      summary: Change the signed-in user's password
+      description: >
+        Verifies the current password, stores the new one, and revokes every
+        existing refresh token (other devices are signed out). Returns a fresh
+        token pair so the calling device stays signed in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '200':
+          description: Password changed; new token pair issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: New password fails validation, or is the same as the current one
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Missing/expired access token, or the current password is wrong
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
   /me:
     get:
       tags: [User]
@@ -304,6 +338,16 @@ components:
       properties:
         refreshToken:
           type: string
+    ChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 128
     TokenResponse:
       type: object
       properties:

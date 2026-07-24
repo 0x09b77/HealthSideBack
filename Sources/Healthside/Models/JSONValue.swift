@@ -46,3 +46,36 @@ enum JSONValue: Codable, Sendable, Equatable {
         }
     }
 }
+
+// MARK: - Convenience accessors (for navigating extraction payloads)
+
+extension JSONValue {
+    subscript(key: String) -> JSONValue? {
+        if case .object(let object) = self { return object[key] }
+        return nil
+    }
+
+    var stringValue: String? {
+        if case .string(let value) = self { return value }
+        return nil
+    }
+
+    /// Number, or a numeric string ("0.8", "<8.1" is not numeric — use `stringValue`).
+    var doubleValue: Double? {
+        switch self {
+        case .number(let value): return value
+        case .string(let value): return Double(value)
+        default: return nil
+        }
+    }
+
+    var boolValue: Bool? {
+        if case .bool(let value) = self { return value }
+        return nil
+    }
+
+    var arrayValue: [JSONValue]? {
+        if case .array(let value) = self { return value }
+        return nil
+    }
+}

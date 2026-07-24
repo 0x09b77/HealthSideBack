@@ -18,6 +18,13 @@ struct AuthController: RouteCollection {
             .post("login", use: self.login)
         auth.post("refresh", use: self.refresh)
         auth.post("logout", use: self.logout)
+
+        // Changing a password needs a live session AND the current password.
+        // Throttled too: a stolen access token could otherwise brute-force the
+        // old password here.
+        auth.grouped(AccessTokenAuthenticator())
+            .grouped(RateLimitMiddleware(limit: loginLimit, window: window, scope: "auth-change-password"))
+            .post("change-password", use: self.changePassword)
     }
 
     /// `POST /auth/register` — create an account.
@@ -102,6 +109,34 @@ struct AuthController: RouteCollection {
             .delete()
 
         return .noContent
+    }
+
+    /// `POST /auth/change-password` — set a new password for the signed-in user.
+    ///
+    /// Every existing refresh token is revoked so a password change actually ends
+    /// other sessions (otherwise a stolen refresh token would survive it). A fresh
+    /// pair is returned so the calling device stays signed in.
+    @Sendable
+    func changePassword(req: Request) async throws -> TokenResponse {
+        let user = try req.auth.require(User.self)
+        try ChangePasswordRequest.validate(content: req)
+        let payload = try req.content.decode(ChangePasswordRequest.self)
+
+        guard try Bcrypt.verify(payload.currentPassword, created: user.passwordHash) else {
+            throw Abort(.unauthorized, reason: "Current password is incorrect")
+        }
+        guard payload.newPassword != payload.currentPassword else {
+            throw Abort(.badRequest, reason: "New password must differ from the current one")
+        }
+
+        user.passwordHash = try Bcrypt.hash(payload.newPassword)
+        try await user.save(on: req.db)
+
+        try await RefreshToken.query(on: req.db)
+            .filter(\.$user.$id == user.requireID())
+            .delete()
+
+        return try await self.issueTokens(for: user, on: req)
     }
 
     /// Issues a new access token plus a stored refresh token for the user.

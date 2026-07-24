@@ -16,6 +16,8 @@ enum DocumentType: String, Codable, Sendable {
     case imagingReport = "imaging_report"
     case consultNote = "consult_note"
     case other
+    /// Not a medical document at all — junk / unrelated / unreadable content.
+    case unrelated
 }
 
 /// A biomarker's value versus its applicable reference range.

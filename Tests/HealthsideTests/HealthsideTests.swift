@@ -112,6 +112,83 @@ struct HealthsideTests {
         }
     }
 
+    @Test("Change password: revokes old sessions, keeps the caller signed in")
+    func changePassword() async throws {
+        try await withApp { app in
+            let tokens = try await authenticate(app, email: "chpw@example.com")
+
+            var newTokens: TokenResponse!
+            try await app.testing().test(.POST, "auth/change-password", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: tokens.accessToken)
+                try req.content.encode(ChangePasswordRequest(currentPassword: "supersecret", newPassword: "brandnewpass"))
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                newTokens = try res.content.decode(TokenResponse.self)
+            })
+            #expect(!newTokens.refreshToken.isEmpty)
+
+            // The old refresh token is dead — other devices are logged out.
+            try await app.testing().test(.POST, "auth/refresh", beforeRequest: { req in
+                try req.content.encode(RefreshRequest(refreshToken: tokens.refreshToken))
+            }, afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+            // The freshly issued one works — this device stayed signed in.
+            try await app.testing().test(.POST, "auth/refresh", beforeRequest: { req in
+                try req.content.encode(RefreshRequest(refreshToken: newTokens.refreshToken))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            // New password logs in; the old one no longer does.
+            try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "chpw@example.com", password: "brandnewpass"))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+            try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "chpw@example.com", password: "supersecret"))
+            }, afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+        }
+    }
+
+    @Test("Change password rejects a wrong current password, a short or unchanged new one, and anonymous callers")
+    func changePasswordRejections() async throws {
+        try await withApp { app in
+            let tokens = try await authenticate(app, email: "chpw-bad@example.com")
+
+            // Wrong current password.
+            try await app.testing().test(.POST, "auth/change-password", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: tokens.accessToken)
+                try req.content.encode(ChangePasswordRequest(currentPassword: "notmypassword", newPassword: "brandnewpass"))
+            }, afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+            // New password too short.
+            try await app.testing().test(.POST, "auth/change-password", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: tokens.accessToken)
+                try req.content.encode(ChangePasswordRequest(currentPassword: "supersecret", newPassword: "short"))
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+            })
+            // New password identical to the current one.
+            try await app.testing().test(.POST, "auth/change-password", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: tokens.accessToken)
+                try req.content.encode(ChangePasswordRequest(currentPassword: "supersecret", newPassword: "supersecret"))
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+            })
+            // No token at all.
+            try await app.testing().test(.POST, "auth/change-password", beforeRequest: { req in
+                try req.content.encode(ChangePasswordRequest(currentPassword: "supersecret", newPassword: "brandnewpass"))
+            }, afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+        }
+    }
+
     @Test("Login with a wrong password is rejected")
     func loginWrongPassword() async throws {
         try await withApp { app in
@@ -234,6 +311,28 @@ struct HealthsideTests {
                 #expect(res.headers.first(name: "Referrer-Policy") == "no-referrer")
             })
         }
+    }
+
+    @Test("De-identifier scrubs contact info and IDs but keeps clinical data")
+    func deidentifier() {
+        // PII is redacted…
+        #expect(Deidentifier.scrub("email dr@clinic.com now") == "email \(Deidentifier.redactionToken) now")
+        #expect(Deidentifier.scrub("MRN 12345678").contains(Deidentifier.redactionToken))
+        #expect(Deidentifier.scrub("+1 (415) 555-1234").contains(Deidentifier.redactionToken))
+        // …while clinical values, units and reference ranges are untouched.
+        #expect(Deidentifier.scrub("130 - 170") == "130 - 170")
+        #expect(Deidentifier.scrub("145 g/L") == "145 g/L")
+
+        // Recursive scrub over a payload: numbers/ranges preserved, string PII gone.
+        let envelope: JSONValue = .object([
+            "provider": .string("City Lab, dr@lab.com"),
+            "value": .number(145),
+            "reference_range": .object(["text": .string("130 - 170")]),
+        ])
+        let scrubbed = Deidentifier.scrub(envelope)
+        #expect(scrubbed["provider"]?.stringValue == "City Lab, \(Deidentifier.redactionToken)")
+        #expect(scrubbed["value"]?.doubleValue == 145)
+        #expect(scrubbed["reference_range"]?["text"]?.stringValue == "130 - 170")
     }
 
     // MARK: - Lab results
@@ -363,12 +462,45 @@ struct HealthsideTests {
         }
     }
 
+    @Test("Retry on a document already being processed is rejected")
+    func retryWhileInFlightIsRejected() async throws {
+        try await withApp { app in
+            let tokens = try await authenticate(app, email: "retry@example.com")
+            let uploaded = try await upload(app, token: tokens.accessToken, bytes: Self.pdfBytes, filename: "a.pdf")
+            let documentId = try #require(uploaded.body).documentId
+
+            // Fresh upload sits at `pending`, so a retry must not stack a second
+            // run (which would call — and bill — the model twice).
+            try await app.testing().test(.POST, "documents/\(documentId)/extract", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: tokens.accessToken)
+            }, afterResponse: { res async in
+                #expect(res.status == .conflict)
+            })
+        }
+    }
+
+    @Test("Retry requires ownership")
+    func retryOwnerIsolation() async throws {
+        try await withApp { app in
+            let owner = try await authenticate(app, email: "r-owner@example.com")
+            let attacker = try await authenticate(app, email: "r-attacker@example.com")
+            let uploaded = try await upload(app, token: owner.accessToken, bytes: Self.pdfBytes, filename: "a.pdf")
+            let documentId = try #require(uploaded.body).documentId
+
+            try await app.testing().test(.POST, "documents/\(documentId)/extract", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: attacker.accessToken)
+            }, afterResponse: { res async in
+                #expect(res.status == .forbidden)
+            })
+        }
+    }
+
     @Test("Upload rejects a disallowed file type by its magic bytes")
     func uploadRejectsBadType() async throws {
         try await withApp { app in
             let tokens = try await authenticate(app, email: "kyle@example.com")
-            // A .pdf name but plain-text bytes — must be rejected on content.
-            let result = try await upload(app, token: tokens.accessToken, bytes: Array("just text".utf8), filename: "fake.pdf")
+            // Binary garbage (NUL bytes, no signature) with a .pdf name — rejected.
+            let result = try await upload(app, token: tokens.accessToken, bytes: [0x00, 0x01, 0x02, 0xFF, 0x00, 0x99, 0x00], filename: "fake.pdf")
             #expect(result.status == .unsupportedMediaType)
         }
     }
@@ -380,6 +512,11 @@ struct HealthsideTests {
             (Self.jpegBytes, "photo.jpg", "image/jpeg"),
             (Self.pngBytes, "screenshot.png", "image/png"),
             (Self.heicBytes, "iphone.heic", "image/heic"),
+            (Array("HEALTHSIDE LAB\nHemoglobin 145 g/L\n".utf8), "report.txt", "text/plain"),
+            ([0x50, 0x4B, 0x03, 0x04] + Array("docx zip body".utf8), "report.docx",
+             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            ([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1] + Array("ole body".utf8), "report.doc",
+             "application/msword"),
         ]
     )
     func uploadAcceptsFormat(bytes: [UInt8], filename: String, expectedMime: String) async throws {

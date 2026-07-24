@@ -25,6 +25,18 @@ struct RefreshRequest: Content {
     let refreshToken: String
 }
 
+/// Body of `POST /auth/change-password`.
+struct ChangePasswordRequest: Content {
+    let currentPassword: String
+    let newPassword: String
+}
+
+extension ChangePasswordRequest: Validatable {
+    static func validations(_ validations: inout Validations) {
+        validations.add("newPassword", as: String.self, is: .count(8...128))
+    }
+}
+
 /// Returned on successful login and refresh.
 struct TokenResponse: Content {
     let accessToken: String

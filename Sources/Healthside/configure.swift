@@ -3,6 +3,8 @@ import Fluent
 import FluentPostgresDriver
 import Foundation
 import JWT
+import Queues
+import QueuesRedisDriver
 import Vapor
 
 /// configures your application
@@ -58,6 +60,24 @@ func configure(_ app: Application) async throws {
 
     // Ensure the local file-storage directory exists before serving uploads.
     try FileStorage(for: app).ensureDirectoryExists()
+
+    // Background jobs (extraction/checkup) run on Redis via Vapor Queues.
+    // Configured only when REDIS_URL is set — without it, uploads still succeed
+    // but stay `pending` (the /extract endpoint remains as a manual fallback).
+    if let redisURL = Environment.get("REDIS_URL") {
+        // Explicit pool: the driver's default is only 2 connections per event
+        // loop, so the worker's blocking queue-poll can starve job execution of
+        // a connection ("timedOutWaitingForConnection"). Give it headroom.
+        let redisConfig = try RedisConfiguration(
+            url: redisURL,
+            pool: .init(
+                maximumConnectionCount: .maximumActiveConnections(8),
+                connectionRetryTimeout: .seconds(10)
+            )
+        )
+        app.queues.use(.redis(redisConfig))
+        app.queues.add(ExtractionJob())
+    }
 
     // register routes
     try routes(app)

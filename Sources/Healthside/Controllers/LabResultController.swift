@@ -1,6 +1,7 @@
 import Crypto
 import Fluent
 import Foundation
+import Queues
 import Vapor
 
 struct LabResultController: RouteCollection {
@@ -31,9 +32,10 @@ struct LabResultController: RouteCollection {
             throw Abort(.payloadTooLarge, reason: "File exceeds the 20 MB limit")
         }
 
-        // Trust the bytes, not the client's filename or Content-Type.
-        guard let type = AllowedFileType.detect(from: Array(data.prefix(16))) else {
-            throw Abort(.unsupportedMediaType, reason: "Only PDF, JPEG, PNG and HEIC are accepted")
+        // Trust the bytes, not the client's filename or Content-Type. A larger
+        // prefix gives the plain-text heuristic enough to judge.
+        guard let type = AllowedFileType.detect(from: Array(data.prefix(512))) else {
+            throw Abort(.unsupportedMediaType, reason: "Accepted: PDF, JPEG, PNG, HEIC, TXT, DOC, DOCX")
         }
 
         // For images: cap declared resolution (decompression-bomb guard) and
@@ -83,9 +85,14 @@ struct LabResultController: RouteCollection {
         }
 
         // Upload is async: the file is stored and marked pending; extraction runs
-        // in the background (worker — next phase). Client polls GET /documents/:id
-        // or waits for a push. `document_id` is the lab-result id (1─1 documents).
-        let accepted = UploadAcceptedResponse(documentId: try result.requireID(), status: result.parseStatus)
+        // in the background worker. Client polls GET /documents/:id or waits for a
+        // push. `document_id` is the lab-result id (1─1 documents).
+        let documentId = try result.requireID()
+        if Environment.get("REDIS_URL") != nil {
+            try await req.queue.dispatch(ExtractionJob.self, .init(labResultID: documentId), maxRetryCount: 3)
+        }
+
+        let accepted = UploadAcceptedResponse(documentId: documentId, status: result.parseStatus)
         return try await accepted.encodeResponse(status: .accepted, for: req)
     }
 
