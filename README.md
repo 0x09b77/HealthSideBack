@@ -1,99 +1,101 @@
-# Healthside — бэкенд
+# Healthside backend
 
-Privacy-first, self-hosted сервис для хранения и разбора медицинских анализов (PDF/фото). Пользователь загружает свои анализы, сервис один раз разбирает каждый файл в структурированные данные (биомаркеры) через Claude API и по запросу собирает целостный чекап по всей истории.
+Self-hosted API for storing and parsing medical lab results (PDF/photo). A user uploads a file, the app parses it once into structured biomarker data via the Claude API, and serves a cached checkup report built from the full history.
 
-## Стек
+## Stack
 
-- **Vapor 4** (Swift) + **Fluent** — веб-фреймворк и ORM
-- **PostgreSQL** — основная БД
-- **JWT + Bcrypt** — авторизация (access/refresh токены, хеш паролей)
-- **Vapor Queues + Redis** — фоновая обработка (извлечение данных, чекап)
-- **Claude API** (`Sources/Healthside/LLM`) — провайдер-агностичный интерфейс для разбора документов
-- **Docker Compose** — локальный запуск и деплой
+- Vapor 4 (Swift) + Fluent — web framework and ORM
+- PostgreSQL
+- JWT + Bcrypt — access/refresh tokens, password hashing
+- Vapor Queues + Redis — background extraction/checkup jobs
+- Claude API (`Sources/Healthside/LLM`) — document parsing, behind a provider-agnostic interface
+- Docker / Docker Compose
 
-Подробности и обоснование выбора — в справочнике «Deployment» вики `HealthSideDocs`.
+## Local development
 
-## Быстрый старт (локально)
+Requires Swift 6.3+ and Docker (for Postgres/Redis).
 
-1. Скопировать `.env.example` в `.env` и заполнить `LLM_API_KEY` (ключ Claude API). `.env` в `.gitignore` — коммитить нельзя.
-   ```bash
-   cp .env.example .env
-   ```
-2. Поднять Postgres и Redis:
-   ```bash
-   docker compose up -d db redis
-   ```
-3. Собрать проект:
-   ```bash
-   swift build
-   ```
-4. Накатить миграции:
-   ```bash
-   swift run Healthside migrate --yes
-   ```
-5. Запустить сервер:
-   ```bash
-   swift run Healthside serve
-   ```
+```bash
+cp .env.example .env        # fill in LLM_API_KEY
+docker compose up -d db redis
+swift build
+swift run Healthside migrate --yes
+swift run Healthside serve
+```
 
-Сервер поднимется на `http://localhost:8080`. Без `REDIS_URL` очередь не включается — загрузка файлов работает, но разбор остаётся `pending` (есть ручной фолбэк `POST /documents/:id/extract`).
+The server listens on `http://localhost:8080`. `swift run`/`swift build` pick up `.env` automatically (Vapor's `DotEnv`).
 
-## Тесты
+Without `REDIS_URL` the queue isn't configured: uploads still succeed but stay `pending`. Use `POST /documents/:id/extract` to parse manually.
+
+## Docker
+
+Every service (`app`, `worker`, `migrate`, `revert`) builds from the same `Dockerfile` and shares the `healthside:latest` image.
+
+```bash
+docker compose build
+docker compose up -d db redis
+docker compose run --rm migrate
+docker compose up -d app worker
+```
+
+- `app` — HTTP API, port 8080
+- `worker` — same image running `queues` (consumes `ExtractionJob`, checkup jobs)
+- `migrate` / `revert` — one-shot migration commands (`replicas: 0`, only run via `docker compose run`)
+- `adminer` — DB UI, disabled by default: `docker compose --profile tools up -d adminer` → `http://localhost:8081`
+
+`docker-compose.yml` reads `JWT_SECRET` and `LLM_API_KEY` from the shell/`.env` file at the project root (`${VAR:-}`) — both are empty by default and the app refuses to start with a missing `JWT_SECRET` in production.
+
+Stop everything: `docker compose down` (add `-v` to drop the `db_data` volume).
+
+## Tests
 
 ```bash
 swift test
 ```
 
-Гоняются против отдельной тестовой БД (`DATABASE_NAME_TEST`, по умолчанию `vapor_test`), не трогают dev-схему.
-
-## Запуск целиком через Docker
+Runs against a separate database (`DATABASE_NAME_TEST`, defaults to `vapor_test`) so it never touches the dev schema. Postgres doesn't create this database for you — create it once:
 
 ```bash
-docker compose up -d db redis
-docker compose run migrate
-docker compose up -d app worker
+docker compose exec db createdb -U vapor_username vapor_test
 ```
 
-- `app` — HTTP API (порт `8080`)
-- `worker` — тот же образ в режиме обработчика очереди (`ExtractionJob`/чекап)
-- `migrate` / `revert` — одноразовые команды миграций
-- `adminer` (опционально, `--profile tools`) — веб-интерфейс к БД на `http://localhost:8081`
-
-## API-документация
+## API docs
 
 - Swagger UI: `http://localhost:8080/docs/`
-- OpenAPI-спека: [`Public/openapi.yaml`](Public/openapi.yaml)
-- Полная карта эндпоинтов: справочник `API` в вики `HealthSideDocs`
+- OpenAPI spec: [`Public/openapi.yaml`](Public/openapi.yaml)
 
-## Структура
+## Environment variables
+
+| Variable | Default | Notes |
+|---|---|---|
+| `JWT_SECRET` | insecure dev secret (non-prod only) | required in production, refuses to boot without it |
+| `LLM_API_KEY` | — | Claude API key, required for extraction/checkup |
+| `CHECKUP_MODEL` | `claude-haiku-4-5` | model used for checkup generation |
+| `REDIS_URL` | unset (queue disabled) | e.g. `redis://localhost:6379` |
+| `DATABASE_HOST` / `PORT` / `USERNAME` / `PASSWORD` / `NAME` | `localhost` / `5432` / `vapor_username` / `vapor_password` / `vapor_database` | matches the `db` service in `docker-compose.yml` |
+| `DATABASE_NAME_TEST` | `vapor_test` | used only when `app.environment == .testing` |
+| `STORAGE_PATH` | `<working dir>/storage/lab-results/` | where uploaded files are written on disk |
+| `RATE_LIMIT_LOGIN` / `RATE_LIMIT_REGISTER` | `10` | requests per client IP per 60s window |
+
+The extraction model is currently hardcoded to `claude-haiku-4-5` in `ExtractionJob.swift`, not configurable via env.
+
+`.env.example` only lists the ones you're expected to set for local dev (`JWT_SECRET`, `LLM_API_KEY`, `REDIS_URL`); the rest have working defaults. Secrets live in the environment only — never in code, never committed.
+
+## Layout
 
 ```
 Sources/Healthside/
-  Controllers/   — HTTP-хендлеры (Auth, LabResult, Document, Checkup, User)
-  Models/        — Fluent-модели
-  Migrations/    — версионированная схема БД
-  Services/      — бизнес-логика (извлечение, деидентификация, сборка чекапа)
-  LLM/           — интеграция с Claude API (промпты, схема, провайдер)
-  Jobs/          — фоновые задачи очереди
-  Middleware/    — rate limiting, security headers
-  Storage/       — работа с файлами (типы, проверка изображений)
-  Authentication/— JWT-аутентификатор
+  Controllers/     HTTP handlers (Auth, LabResult, Document, Checkup, User)
+  Models/          Fluent models
+  Migrations/      versioned schema
+  Services/        extraction, de-identification, checkup assembly
+  LLM/             Claude API integration — provider, prompts, extraction schema
+  Jobs/            queue jobs (ExtractionJob)
+  Middleware/      rate limiting, security headers
+  Storage/         file storage, upload validation
+  Authentication/  JWT access-token authenticator
 ```
 
-## Переменные окружения
+## Further docs
 
-См. [`.env.example`](.env.example) — полный список с комментариями. Ключевые:
-
-| Переменная | Назначение |
-|---|---|
-| `JWT_SECRET` | подпись access-токенов (обязателен в production) |
-| `LLM_API_KEY` | ключ Claude API для извлечения/чекапа |
-| `DATABASE_*` | подключение к PostgreSQL |
-| `REDIS_URL` | очередь фоновых задач (опционально локально) |
-| `STORAGE_PATH` | путь к локальному хранилищу файлов анализов |
-
-Секреты — только через окружение, никогда не в коде и не в репозитории.
-
-## Документация проекта
-
-Полная документация (архитектура, поток данных, безопасность/приватность, комплаенс, промпты, мобильная часть) — в отдельном Obsidian-вики `HealthSideDocs`, папка `Backend/`.
+Architecture, data flow, security/privacy, compliance notes, and prompts live in the `HealthSideDocs` vault (not part of this repo).
