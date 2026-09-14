@@ -13,3 +13,6 @@ default.profraw
 
 # Local file storage for lab results (bytes live outside the repo)
 storage/
+
+# Personal/local Claude Code settings — machine-specific, not shared config
+.claude/settings.local.json

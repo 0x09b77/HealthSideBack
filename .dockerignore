@@ -1,2 +1,13 @@
 .build/
 .swiftpm/
+
+# Secrets and local data — never bake these into an image layer
+.env
+.env.*
+!.env.example
+storage/
+
+.git/
+.gitignore
+.vscode/
+.claude/
