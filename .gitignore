@@ -11,8 +11,11 @@ db.sqlite
 !.env.example
 default.profraw
 
-# Local file storage for lab results (bytes live outside the repo)
-storage/
+# Local file storage for lab results (bytes live outside the repo).
+# Anchored to repo root (leading slash) — otherwise this also matches
+# Sources/Healthside/Storage/ on case-insensitive filesystems (macOS/APFS
+# default), silently dropping real source files from git.
+/storage/
 
 # Personal/local Claude Code settings — machine-specific, not shared config
 .claude/settings.local.json
