@@ -67,3 +67,29 @@ extension ResendVerificationRequest: Validatable {
         validations.add("email", as: String.self, is: .email)
     }
 }
+
+/// Body of `POST /auth/forgot-password`.
+struct ForgotPasswordRequest: Content {
+    let email: String
+}
+
+extension ForgotPasswordRequest: Validatable {
+    static func validations(_ validations: inout Validations) {
+        validations.add("email", as: String.self, is: .email)
+    }
+}
+
+/// Body of `POST /auth/reset-password`.
+struct ResetPasswordRequest: Content {
+    let email: String
+    let code: String
+    let newPassword: String
+}
+
+extension ResetPasswordRequest: Validatable {
+    static func validations(_ validations: inout Validations) {
+        validations.add("email", as: String.self, is: .email)
+        validations.add("code", as: String.self, is: .count(6...6) && .characterSet(.decimalDigits))
+        validations.add("newPassword", as: String.self, is: .count(8...128))
+    }
+}

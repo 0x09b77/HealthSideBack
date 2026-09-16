@@ -76,6 +76,8 @@ docker compose exec db createdb -U vapor_username vapor_test
 | `MAIL_FROM` | `Healthside <onboarding@resend.dev>` | sandbox address unless a domain is verified on Resend |
 | `RATE_LIMIT_VERIFY_EMAIL` | `10` | requests per client IP per 60s window |
 | `RATE_LIMIT_RESEND_VERIFICATION` | `5` | requests per client IP per 60s window |
+| `RATE_LIMIT_FORGOT_PASSWORD` | `5` | requests per client IP per 60s window |
+| `RATE_LIMIT_RESET_PASSWORD` | `10` | requests per client IP per 60s window |
 | `DATABASE_HOST` / `PORT` / `USERNAME` / `PASSWORD` / `NAME` | `localhost` / `5432` / `vapor_username` / `vapor_password` / `vapor_database` | matches the `db` service in `docker-compose.yml` |
 | `DATABASE_NAME_TEST` | `vapor_test` | used only when `app.environment == .testing` |
 | `STORAGE_PATH` | `<working dir>/storage/lab-results/` | where uploaded files are written on disk |

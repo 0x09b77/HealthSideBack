@@ -16,6 +16,8 @@ struct AuthController: RouteCollection {
         // Each hit sends a real email — throttle harder than everything else so
         // this can't be used to spam a victim's inbox.
         let resendLimit = Environment.get("RATE_LIMIT_RESEND_VERIFICATION").flatMap(Int.init) ?? 5
+        let forgotPasswordLimit = Environment.get("RATE_LIMIT_FORGOT_PASSWORD").flatMap(Int.init) ?? 5
+        let resetPasswordLimit = Environment.get("RATE_LIMIT_RESET_PASSWORD").flatMap(Int.init) ?? 10
 
         auth.grouped(RateLimitMiddleware(limit: registerLimit, window: window, scope: "auth-register"))
             .post("register", use: self.register)
@@ -25,6 +27,10 @@ struct AuthController: RouteCollection {
             .post("verify-email", use: self.verifyEmail)
         auth.grouped(RateLimitMiddleware(limit: resendLimit, window: window, scope: "auth-resend-verification"))
             .post("resend-verification", use: self.resendVerification)
+        auth.grouped(RateLimitMiddleware(limit: forgotPasswordLimit, window: window, scope: "auth-forgot-password"))
+            .post("forgot-password", use: self.forgotPassword)
+        auth.grouped(RateLimitMiddleware(limit: resetPasswordLimit, window: window, scope: "auth-reset-password"))
+            .post("reset-password", use: self.resetPassword)
         auth.post("refresh", use: self.refresh)
         auth.post("logout", use: self.logout)
 
@@ -149,6 +155,76 @@ struct AuthController: RouteCollection {
         return .noContent
     }
 
+    /// `POST /auth/forgot-password` — issue a password-reset code. Always
+    /// responds `204`, whether or not the email is registered — doesn't
+    /// reveal which.
+    @Sendable
+    func forgotPassword(req: Request) async throws -> HTTPStatus {
+        try ForgotPasswordRequest.validate(content: req)
+        let payload = try req.content.decode(ForgotPasswordRequest.self)
+        let email = Self.normalize(payload.email)
+
+        if let user = try await User.query(on: req.db).filter(\.$email == email).first() {
+            do {
+                try await self.sendPasswordResetCode(to: user, on: req)
+            } catch {
+                req.logger.warning("Failed to send password-reset email to \(email): \(error)")
+            }
+        }
+
+        return .noContent
+    }
+
+    /// `POST /auth/reset-password` — confirm the code, set the new password,
+    /// and log in. Revokes every existing refresh token (same reasoning as
+    /// `change-password`: a reset often means the account was at risk) and,
+    /// since receiving the code proves inbox ownership, marks the email
+    /// verified as a side effect.
+    @Sendable
+    func resetPassword(req: Request) async throws -> TokenResponse {
+        try ResetPasswordRequest.validate(content: req)
+        let payload = try req.content.decode(ResetPasswordRequest.self)
+        let email = Self.normalize(payload.email)
+
+        guard let user = try await User.query(on: req.db)
+            .filter(\.$email == email)
+            .first()
+        else {
+            throw Abort(.badRequest, reason: "Invalid or expired code")
+        }
+
+        guard let code = try await PasswordResetCode.query(on: req.db)
+            .filter(\.$user.$id == user.requireID())
+            .sort(\.$createdAt, .descending)
+            .first()
+        else {
+            throw Abort(.badRequest, reason: "Invalid or expired code")
+        }
+
+        guard !code.isExpired, !code.isLocked else {
+            throw Abort(.badRequest, reason: "Invalid or expired code")
+        }
+
+        guard code.codeHash == PasswordResetCode.hash(of: payload.code) else {
+            code.attempts += 1
+            try await code.save(on: req.db)
+            throw Abort(.badRequest, reason: "Invalid or expired code")
+        }
+
+        user.passwordHash = try Bcrypt.hash(payload.newPassword)
+        user.emailVerified = true
+        try await user.save(on: req.db)
+
+        try await PasswordResetCode.query(on: req.db)
+            .filter(\.$user.$id == user.requireID())
+            .delete()
+        try await RefreshToken.query(on: req.db)
+            .filter(\.$user.$id == user.requireID())
+            .delete()
+
+        return try await self.issueTokens(for: user, on: req)
+    }
+
     /// `POST /auth/refresh` — exchange a valid refresh token for a new token pair.
     ///
     /// The presented refresh token is rotated: it's deleted and a fresh one is
@@ -256,6 +332,28 @@ struct AuthController: RouteCollection {
             subject: "Your Healthside verification code",
             text: "Your verification code is \(raw). It expires in 15 minutes.",
             html: "<p>Your verification code is <strong>\(raw)</strong>. It expires in 15 minutes.</p>"
+        )
+    }
+
+    /// Replaces any existing reset codes for the user with a fresh one and emails it.
+    private func sendPasswordResetCode(to user: User, on req: Request) async throws {
+        try await PasswordResetCode.query(on: req.db)
+            .filter(\.$user.$id == user.requireID())
+            .delete()
+
+        let (raw, hash) = PasswordResetCode.generate()
+        let code = PasswordResetCode(
+            userID: try user.requireID(),
+            codeHash: hash,
+            expiresAt: Date().addingTimeInterval(PasswordResetCode.lifetime)
+        )
+        try await code.save(on: req.db)
+
+        try await req.application.emailProvider.send(
+            to: user.email,
+            subject: "Your Healthside password reset code",
+            text: "Your password reset code is \(raw). It expires in 15 minutes. If you didn't request this, you can ignore this email.",
+            html: "<p>Your password reset code is <strong>\(raw)</strong>. It expires in 15 minutes.</p><p>If you didn't request this, you can ignore this email.</p>"
         )
     }
 

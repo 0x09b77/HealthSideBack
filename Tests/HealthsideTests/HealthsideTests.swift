@@ -362,6 +362,136 @@ struct HealthsideTests {
         }
     }
 
+    // MARK: - Password reset
+
+    @Test("Reset-password with the correct code sets the new password, logs in, and revokes old sessions")
+    func resetPasswordSuccess() async throws {
+        try await withApp { app in
+            let oldTokens = try await authenticate(app, email: "reset-ok@example.com")
+
+            try await app.testing().test(.POST, "auth/forgot-password", beforeRequest: { req in
+                try req.content.encode(ForgotPasswordRequest(email: "reset-ok@example.com"))
+            }, afterResponse: { res async in
+                #expect(res.status == .noContent)
+            })
+            let capture = try #require(app.emailProvider as? CapturingEmailProvider)
+            let code = try #require(await capture.lastCode(to: "reset-ok@example.com"))
+
+            var newTokens: TokenResponse!
+            try await app.testing().test(.POST, "auth/reset-password", beforeRequest: { req in
+                try req.content.encode(ResetPasswordRequest(email: "reset-ok@example.com", code: code, newPassword: "brandnewpass"))
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                newTokens = try res.content.decode(TokenResponse.self)
+            })
+            #expect(!newTokens.accessToken.isEmpty)
+
+            // The pre-reset refresh token is dead — resetting ends other sessions.
+            try await app.testing().test(.POST, "auth/refresh", beforeRequest: { req in
+                try req.content.encode(RefreshRequest(refreshToken: oldTokens.refreshToken))
+            }, afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+
+            // New password logs in; the old one no longer does.
+            try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "reset-ok@example.com", password: "brandnewpass"))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+            try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "reset-ok@example.com", password: "supersecret"))
+            }, afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+        }
+    }
+
+    @Test("Reset-password rejects a wrong code")
+    func resetPasswordWrongCode() async throws {
+        try await withApp { app in
+            _ = try await authenticate(app, email: "reset-wrong@example.com")
+
+            try await app.testing().test(.POST, "auth/forgot-password", beforeRequest: { req in
+                try req.content.encode(ForgotPasswordRequest(email: "reset-wrong@example.com"))
+            })
+            try await app.testing().test(.POST, "auth/reset-password", beforeRequest: { req in
+                try req.content.encode(ResetPasswordRequest(email: "reset-wrong@example.com", code: "000000", newPassword: "brandnewpass"))
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+            })
+
+            // Password is untouched.
+            try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "reset-wrong@example.com", password: "supersecret"))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+        }
+    }
+
+    @Test("Reset-password locks out after 5 wrong attempts, even with the right code")
+    func resetPasswordLockout() async throws {
+        try await withApp { app in
+            _ = try await authenticate(app, email: "reset-lock@example.com")
+            try await app.testing().test(.POST, "auth/forgot-password", beforeRequest: { req in
+                try req.content.encode(ForgotPasswordRequest(email: "reset-lock@example.com"))
+            })
+
+            for _ in 0..<PasswordResetCode.maxAttempts {
+                try await app.testing().test(.POST, "auth/reset-password", beforeRequest: { req in
+                    try req.content.encode(ResetPasswordRequest(email: "reset-lock@example.com", code: "000000", newPassword: "brandnewpass"))
+                }, afterResponse: { res async in
+                    #expect(res.status == .badRequest)
+                })
+            }
+
+            let capture = try #require(app.emailProvider as? CapturingEmailProvider)
+            let code = try #require(await capture.lastCode(to: "reset-lock@example.com"))
+            try await app.testing().test(.POST, "auth/reset-password", beforeRequest: { req in
+                try req.content.encode(ResetPasswordRequest(email: "reset-lock@example.com", code: code, newPassword: "brandnewpass"))
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+            })
+        }
+    }
+
+    @Test("Reset-password rejects an expired code")
+    func resetPasswordExpired() async throws {
+        try await withApp { app in
+            _ = try await authenticate(app, email: "reset-expired@example.com")
+            try await app.testing().test(.POST, "auth/forgot-password", beforeRequest: { req in
+                try req.content.encode(ForgotPasswordRequest(email: "reset-expired@example.com"))
+            })
+
+            let dbUser = try #require(await User.query(on: app.db).filter(\.$email == "reset-expired@example.com").first())
+            let storedCode = try #require(await PasswordResetCode.query(on: app.db)
+                .filter(\.$user.$id == dbUser.requireID())
+                .first())
+            storedCode.expiresAt = Date().addingTimeInterval(-60)
+            try await storedCode.save(on: app.db)
+
+            let capture = try #require(app.emailProvider as? CapturingEmailProvider)
+            let code = try #require(await capture.lastCode(to: "reset-expired@example.com"))
+            try await app.testing().test(.POST, "auth/reset-password", beforeRequest: { req in
+                try req.content.encode(ResetPasswordRequest(email: "reset-expired@example.com", code: code, newPassword: "brandnewpass"))
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+            })
+        }
+    }
+
+    @Test("Forgot-password always responds 204, whether or not the email is registered")
+    func forgotPasswordDoesNotLeak() async throws {
+        try await withApp { app in
+            try await app.testing().test(.POST, "auth/forgot-password", beforeRequest: { req in
+                try req.content.encode(ForgotPasswordRequest(email: "nobody-reset@example.com"))
+            }, afterResponse: { res async in
+                #expect(res.status == .noContent)
+            })
+        }
+    }
+
     // MARK: - Helpers
 
     /// Registers, verifies (via the captured code) and returns the issued

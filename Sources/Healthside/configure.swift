@@ -60,6 +60,7 @@ func configure(_ app: Application) async throws {
     app.migrations.add(CreateUser())
     app.migrations.add(AddEmailVerifiedToUsers())
     app.migrations.add(CreateEmailVerificationCode())
+    app.migrations.add(CreatePasswordResetCode())
     app.migrations.add(CreateRefreshToken())
     app.migrations.add(CreateDeviceToken())
     app.migrations.add(CreateLabResult())

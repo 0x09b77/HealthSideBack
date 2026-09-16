@@ -137,6 +137,58 @@ paths:
         '429':
           $ref: '#/components/responses/TooManyRequests'
 
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Send a password-reset code
+      description: >
+        Always responds `204` — whether or not the email is registered —
+        so this can't be used to probe which emails exist.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPasswordRequest'
+      responses:
+        '204':
+          description: Request accepted (no guarantee an email was actually sent)
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Confirm the code, set a new password, and log in
+      description: >
+        On success revokes every existing refresh token (a reset often means
+        the account was at risk) and marks the email verified — receiving
+        the code proves inbox ownership. Returns a token pair, same as
+        `/auth/verify-email`. A code expires after 15 minutes or 5 wrong
+        attempts, whichever comes first.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '200':
+          description: Password reset; token pair issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Code is wrong, expired, or locked out after too many attempts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
   /auth/refresh:
     post:
       tags: [Auth]
@@ -427,6 +479,28 @@ components:
         email:
           type: string
           format: email
+    ForgotPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+    ResetPasswordRequest:
+      type: object
+      required: [email, code, newPassword]
+      properties:
+        email:
+          type: string
+          format: email
+        code:
+          type: string
+          pattern: '^[0-9]{6}$'
+          example: '123456'
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 128
     TokenResponse:
       type: object
       properties:
