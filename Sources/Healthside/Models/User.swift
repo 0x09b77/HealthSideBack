@@ -19,6 +19,13 @@ final class User: Model, Authenticatable, @unchecked Sendable {
     @Field(key: "password_hash")
     var passwordHash: String
 
+    /// Gates login (see R-Auth). `/auth/register` always creates this as
+    /// `false`; the default of `true` here is for code that constructs a
+    /// `User` directly (tests, migrations) without going through the
+    /// verification flow.
+    @Field(key: "email_verified")
+    var emailVerified: Bool
+
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
 
@@ -27,16 +34,18 @@ final class User: Model, Authenticatable, @unchecked Sendable {
 
     init() { }
 
-    init(id: UUID? = nil, email: String, passwordHash: String) {
+    init(id: UUID? = nil, email: String, passwordHash: String, emailVerified: Bool = true) {
         self.id = id
         self.email = email
         self.passwordHash = passwordHash
+        self.emailVerified = emailVerified
     }
 
     func toResponse() throws -> UserResponse {
         .init(
             id: try self.requireID(),
             email: self.email,
+            emailVerified: self.emailVerified,
             createdAt: self.createdAt
         )
     }

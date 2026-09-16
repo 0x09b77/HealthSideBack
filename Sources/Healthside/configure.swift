@@ -58,6 +58,8 @@ func configure(_ app: Application) async throws {
 
     // Order respects foreign keys (parent before child) — see R-Data-Model.
     app.migrations.add(CreateUser())
+    app.migrations.add(AddEmailVerifiedToUsers())
+    app.migrations.add(CreateEmailVerificationCode())
     app.migrations.add(CreateRefreshToken())
     app.migrations.add(CreateDeviceToken())
     app.migrations.add(CreateLabResult())
@@ -65,6 +67,16 @@ func configure(_ app: Application) async throws {
     app.migrations.add(CreateDocument())
     app.migrations.add(CreateBiomarker())
     app.migrations.add(CreateCheckup())
+
+    // Verification emails (see R-Auth). Without a key, `emailProvider`
+    // defaults to logging instead of sending — registration still works, the
+    // code just never leaves the server (fine for local dev/tests).
+    if let resendKey = Environment.get("RESEND_API_KEY") {
+        let from = Environment.get("MAIL_FROM") ?? "Healthside <onboarding@resend.dev>"
+        app.emailProvider = ResendProvider(client: app.client, apiKey: resendKey, from: from, logger: app.logger)
+    } else if app.environment != .testing {
+        app.logger.warning("RESEND_API_KEY not set — verification emails will only be logged")
+    }
 
     // Ensure the local file-storage directory exists before serving uploads.
     try FileStorage(for: app).ensureDirectoryExists()

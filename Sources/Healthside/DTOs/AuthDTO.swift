@@ -17,6 +17,7 @@ extension AuthRequest: Validatable {
 struct UserResponse: Content {
     let id: UUID
     let email: String
+    let emailVerified: Bool
     let createdAt: Date?
 }
 
@@ -41,4 +42,28 @@ extension ChangePasswordRequest: Validatable {
 struct TokenResponse: Content {
     let accessToken: String
     let refreshToken: String
+}
+
+/// Body of `POST /auth/verify-email`.
+struct VerifyEmailRequest: Content {
+    let email: String
+    let code: String
+}
+
+extension VerifyEmailRequest: Validatable {
+    static func validations(_ validations: inout Validations) {
+        validations.add("email", as: String.self, is: .email)
+        validations.add("code", as: String.self, is: .count(6...6) && .characterSet(.decimalDigits))
+    }
+}
+
+/// Body of `POST /auth/resend-verification`.
+struct ResendVerificationRequest: Content {
+    let email: String
+}
+
+extension ResendVerificationRequest: Validatable {
+    static func validations(_ validations: inout Validations) {
+        validations.add("email", as: String.self, is: .email)
+    }
 }

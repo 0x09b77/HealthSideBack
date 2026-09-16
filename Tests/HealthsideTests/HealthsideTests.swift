@@ -9,6 +9,8 @@ struct HealthsideTests {
         let app = try await Application.make(.testing)
         do {
             try await configure(app)
+            // Real sending is never exercised in tests — capture instead.
+            app.emailProvider = CapturingEmailProvider()
             try await app.autoMigrate()
             try await test(app)
             try await app.autoRevert()
@@ -203,9 +205,168 @@ struct HealthsideTests {
         }
     }
 
+    // MARK: - Email verification
+
+    @Test("Register creates an unverified account; login is blocked until verified")
+    func registerBlocksLoginUntilVerified() async throws {
+        try await withApp { app in
+            try await app.testing().test(.POST, "auth/register", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "unverified@example.com", password: "supersecret"))
+            }, afterResponse: { res async throws in
+                #expect(res.status == .created)
+                let profile = try res.content.decode(UserResponse.self)
+                #expect(profile.emailVerified == false)
+            })
+
+            try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "unverified@example.com", password: "supersecret"))
+            }, afterResponse: { res async in
+                #expect(res.status == .forbidden)
+            })
+        }
+    }
+
+    @Test("Verify-email with the correct code verifies the account and logs in")
+    func verifyEmailSuccess() async throws {
+        try await withApp { app in
+            let tokens = try await authenticate(app, email: "verify-ok@example.com")
+            #expect(!tokens.accessToken.isEmpty)
+
+            // Now verified — a normal /auth/login also works.
+            try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "verify-ok@example.com", password: "supersecret"))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+        }
+    }
+
+    @Test("Verify-email rejects a wrong code and leaves the account unverified")
+    func verifyEmailWrongCode() async throws {
+        try await withApp { app in
+            try await app.testing().test(.POST, "auth/register", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "verify-wrong@example.com", password: "supersecret"))
+            })
+
+            try await app.testing().test(.POST, "auth/verify-email", beforeRequest: { req in
+                try req.content.encode(VerifyEmailRequest(email: "verify-wrong@example.com", code: "000000"))
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+            })
+
+            try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "verify-wrong@example.com", password: "supersecret"))
+            }, afterResponse: { res async in
+                #expect(res.status == .forbidden)
+            })
+        }
+    }
+
+    @Test("Verify-email locks out after 5 wrong attempts, even with the right code")
+    func verifyEmailLockout() async throws {
+        try await withApp { app in
+            try await app.testing().test(.POST, "auth/register", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "verify-lock@example.com", password: "supersecret"))
+            })
+
+            for _ in 0..<EmailVerificationCode.maxAttempts {
+                try await app.testing().test(.POST, "auth/verify-email", beforeRequest: { req in
+                    try req.content.encode(VerifyEmailRequest(email: "verify-lock@example.com", code: "000000"))
+                }, afterResponse: { res async in
+                    #expect(res.status == .badRequest)
+                })
+            }
+
+            let capture = try #require(app.emailProvider as? CapturingEmailProvider)
+            let code = try #require(await capture.lastCode(to: "verify-lock@example.com"))
+            try await app.testing().test(.POST, "auth/verify-email", beforeRequest: { req in
+                try req.content.encode(VerifyEmailRequest(email: "verify-lock@example.com", code: code))
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+            })
+        }
+    }
+
+    @Test("Verify-email rejects an expired code")
+    func verifyEmailExpired() async throws {
+        try await withApp { app in
+            try await app.testing().test(.POST, "auth/register", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "verify-expired@example.com", password: "supersecret"))
+            })
+
+            let user = try #require(await User.query(on: app.db).filter(\.$email == "verify-expired@example.com").first())
+            let storedCode = try #require(await EmailVerificationCode.query(on: app.db)
+                .filter(\.$user.$id == user.requireID())
+                .first())
+            storedCode.expiresAt = Date().addingTimeInterval(-60)
+            try await storedCode.save(on: app.db)
+
+            let capture = try #require(app.emailProvider as? CapturingEmailProvider)
+            let rawCode = try #require(await capture.lastCode(to: "verify-expired@example.com"))
+            try await app.testing().test(.POST, "auth/verify-email", beforeRequest: { req in
+                try req.content.encode(VerifyEmailRequest(email: "verify-expired@example.com", code: rawCode))
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+            })
+        }
+    }
+
+    @Test("Resend-verification issues a fresh code and invalidates the old one")
+    func resendVerification() async throws {
+        try await withApp { app in
+            try await app.testing().test(.POST, "auth/register", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "resend@example.com", password: "supersecret"))
+            })
+            let capture = try #require(app.emailProvider as? CapturingEmailProvider)
+            let firstCode = try #require(await capture.lastCode(to: "resend@example.com"))
+
+            try await app.testing().test(.POST, "auth/resend-verification", beforeRequest: { req in
+                try req.content.encode(ResendVerificationRequest(email: "resend@example.com"))
+            }, afterResponse: { res async in
+                #expect(res.status == .noContent)
+            })
+            let secondCode = try #require(await capture.lastCode(to: "resend@example.com"))
+            #expect(firstCode != secondCode)
+
+            // The old code no longer works — it was invalidated by the resend.
+            try await app.testing().test(.POST, "auth/verify-email", beforeRequest: { req in
+                try req.content.encode(VerifyEmailRequest(email: "resend@example.com", code: firstCode))
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+            })
+
+            // The new one works.
+            try await app.testing().test(.POST, "auth/verify-email", beforeRequest: { req in
+                try req.content.encode(VerifyEmailRequest(email: "resend@example.com", code: secondCode))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+        }
+    }
+
+    @Test("Resend-verification always responds 204, whether the email exists, is unknown, or is already verified")
+    func resendVerificationDoesNotLeak() async throws {
+        try await withApp { app in
+            try await app.testing().test(.POST, "auth/resend-verification", beforeRequest: { req in
+                try req.content.encode(ResendVerificationRequest(email: "nobody@example.com"))
+            }, afterResponse: { res async in
+                #expect(res.status == .noContent)
+            })
+
+            _ = try await authenticate(app, email: "already-verified@example.com")
+            try await app.testing().test(.POST, "auth/resend-verification", beforeRequest: { req in
+                try req.content.encode(ResendVerificationRequest(email: "already-verified@example.com"))
+            }, afterResponse: { res async in
+                #expect(res.status == .noContent)
+            })
+        }
+    }
+
     // MARK: - Helpers
 
-    /// Registers and logs in a user, returning the issued token pair.
+    /// Registers, verifies (via the captured code) and returns the issued
+    /// token pair — login itself is blocked until verification, so this
+    /// replaces the old register→login helper for every other test.
     private func authenticate(
         _ app: Application,
         email: String,
@@ -214,9 +375,13 @@ struct HealthsideTests {
         try await app.testing().test(.POST, "auth/register", beforeRequest: { req in
             try req.content.encode(AuthRequest(email: email, password: password))
         })
+
+        let capture = try #require(app.emailProvider as? CapturingEmailProvider)
+        let code = try #require(await capture.lastCode(to: email.lowercased()))
+
         var tokens: TokenResponse!
-        try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
-            try req.content.encode(AuthRequest(email: email, password: password))
+        try await app.testing().test(.POST, "auth/verify-email", beforeRequest: { req in
+            try req.content.encode(VerifyEmailRequest(email: email, code: code))
         }, afterResponse: { res async throws in
             tokens = try res.content.decode(TokenResponse.self)
         })
@@ -623,5 +788,21 @@ struct HealthsideTests {
                 #expect(list.isEmpty)
             })
         }
+    }
+}
+
+/// Captures outgoing verification emails instead of hitting the real Resend
+/// API — tests read the code back via `lastCode(to:)`.
+actor CapturingEmailProvider: EmailProvider {
+    private var sent: [String: [String]] = [:]
+
+    func send(to: String, subject: String, text: String, html: String) async throws {
+        sent[to, default: []].append(text)
+    }
+
+    /// The 6-digit code from the most recently sent email to `to`.
+    func lastCode(to: String) -> String? {
+        guard let text = sent[to]?.last else { return nil }
+        return text.range(of: #"\d{6}"#, options: .regularExpression).map { String(text[$0]) }
     }
 }

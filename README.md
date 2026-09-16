@@ -72,6 +72,10 @@ docker compose exec db createdb -U vapor_username vapor_test
 | `LLM_API_KEY` | — | Claude API key, required for extraction/checkup |
 | `CHECKUP_MODEL` | `claude-haiku-4-5` | model used for checkup generation |
 | `REDIS_URL` | unset (queue disabled) | e.g. `redis://localhost:6379` |
+| `RESEND_API_KEY` | unset (emails only logged) | required to actually send verification codes |
+| `MAIL_FROM` | `Healthside <onboarding@resend.dev>` | sandbox address unless a domain is verified on Resend |
+| `RATE_LIMIT_VERIFY_EMAIL` | `10` | requests per client IP per 60s window |
+| `RATE_LIMIT_RESEND_VERIFICATION` | `5` | requests per client IP per 60s window |
 | `DATABASE_HOST` / `PORT` / `USERNAME` / `PASSWORD` / `NAME` | `localhost` / `5432` / `vapor_username` / `vapor_password` / `vapor_database` | matches the `db` service in `docker-compose.yml` |
 | `DATABASE_NAME_TEST` | `vapor_test` | used only when `app.environment == .testing` |
 | `STORAGE_PATH` | `<working dir>/storage/lab-results/` | where uploaded files are written on disk |

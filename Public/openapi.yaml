@@ -26,6 +26,11 @@ paths:
     post:
       tags: [Auth]
       summary: Register a new account
+      description: >
+        Creates the account as unverified and emails a 6-digit code. The
+        account can't log in until that code is confirmed via
+        `/auth/verify-email` — registration succeeds even if the email
+        fails to send (use `/auth/resend-verification` to retry).
       security: []
       requestBody:
         required: true
@@ -73,6 +78,62 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Credentials are correct but the email isn't verified yet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/verify-email:
+    post:
+      tags: [Auth]
+      summary: Confirm the 6-digit code emailed at registration
+      description: >
+        On success marks the account verified and logs it in (returns a
+        token pair — no separate `/auth/login` call needed). A code expires
+        after 15 minutes or 5 wrong attempts, whichever comes first.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyEmailRequest'
+      responses:
+        '200':
+          description: Email verified; token pair issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Code is wrong, expired, or locked out after too many attempts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/resend-verification:
+    post:
+      tags: [Auth]
+      summary: Send a fresh verification code, invalidating the previous one
+      description: >
+        Always responds `204` — whether the email is registered, already
+        verified, or the send itself fails — so this can't be used to probe
+        which emails exist.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendVerificationRequest'
+      responses:
+        '204':
+          description: Request accepted (no guarantee an email was actually sent)
         '429':
           $ref: '#/components/responses/TooManyRequests'
 
@@ -348,6 +409,24 @@ components:
           type: string
           minLength: 8
           maxLength: 128
+    VerifyEmailRequest:
+      type: object
+      required: [email, code]
+      properties:
+        email:
+          type: string
+          format: email
+        code:
+          type: string
+          pattern: '^[0-9]{6}$'
+          example: '123456'
+    ResendVerificationRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
     TokenResponse:
       type: object
       properties:
@@ -366,6 +445,8 @@ components:
         email:
           type: string
           format: email
+        emailVerified:
+          type: boolean
         createdAt:
           type: string
           format: date-time
