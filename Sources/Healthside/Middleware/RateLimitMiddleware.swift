@@ -12,11 +12,20 @@ struct RateLimitMiddleware: AsyncMiddleware {
 
     func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
         let key = "\(scope):\(Self.clientIdentifier(request))"
-        let decision = await request.application.rateLimiter.record(key: key, limit: limit, window: window)
+        try await Self.enforce(key: key, limit: limit, window: window, on: request)
+        return try await next.respond(to: request)
+    }
 
+    /// Records a hit against `key` and throws `429` if it exceeds `limit`
+    /// within `window`. Shared by this middleware (keyed by client IP) and
+    /// handlers that also rate-limit by a request-specific key — e.g. the
+    /// target email on `/auth/login`, so guessing one account's password
+    /// can't dodge the limit by spreading attempts across many IPs.
+    static func enforce(key: String, limit: Int, window: TimeInterval, on request: Request) async throws {
+        let decision = await request.application.rateLimiter.record(key: key, limit: limit, window: window)
         switch decision {
         case .allow:
-            return try await next.respond(to: request)
+            return
         case .deny(let retryAfter):
             var headers = HTTPHeaders()
             headers.replaceOrAdd(name: .retryAfter, value: String(retryAfter))

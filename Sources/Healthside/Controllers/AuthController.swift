@@ -80,6 +80,16 @@ struct AuthController: RouteCollection {
         let payload = try req.content.decode(AuthRequest.self)
         let email = Self.normalize(payload.email)
 
+        // In addition to the per-IP limit on this route: without this, an
+        // attacker spreading guesses across many IPs could brute-force one
+        // known email's password with no effective limit at all.
+        try await RateLimitMiddleware.enforce(
+            key: "auth-login-account:\(email)",
+            limit: Self.rateLimit("RATE_LIMIT_LOGIN_PER_ACCOUNT", default: 10),
+            window: 60,
+            on: req
+        )
+
         // Same generic error whether the user is missing, has no password
         // (Apple-only account), or the password is wrong — don't reveal
         // which emails are registered or how they authenticate.
@@ -148,6 +158,15 @@ struct AuthController: RouteCollection {
         let payload = try req.content.decode(ResendVerificationRequest.self)
         let email = Self.normalize(payload.email)
 
+        // Per-email, on top of the per-IP limit — otherwise many IPs could
+        // still spam one inbox with codes.
+        try await RateLimitMiddleware.enforce(
+            key: "auth-resend-verification-account:\(email)",
+            limit: Self.rateLimit("RATE_LIMIT_RESEND_VERIFICATION", default: 5),
+            window: 60,
+            on: req
+        )
+
         if let user = try await User.query(on: req.db).filter(\.$email == email).first(),
            !user.emailVerified {
             do {
@@ -168,6 +187,15 @@ struct AuthController: RouteCollection {
         try ForgotPasswordRequest.validate(content: req)
         let payload = try req.content.decode(ForgotPasswordRequest.self)
         let email = Self.normalize(payload.email)
+
+        // Per-email, on top of the per-IP limit — otherwise many IPs could
+        // still spam one inbox with reset codes.
+        try await RateLimitMiddleware.enforce(
+            key: "auth-forgot-password-account:\(email)",
+            limit: Self.rateLimit("RATE_LIMIT_FORGOT_PASSWORD", default: 5),
+            window: 60,
+            on: req
+        )
 
         if let user = try await User.query(on: req.db).filter(\.$email == email).first() {
             do {
@@ -344,6 +372,15 @@ struct AuthController: RouteCollection {
         try ChangePasswordRequest.validate(content: req)
         let payload = try req.content.decode(ChangePasswordRequest.self)
 
+        // Per-account, on top of the per-IP limit — a stolen access token
+        // used from many IPs shouldn't get more guesses at the old password.
+        try await RateLimitMiddleware.enforce(
+            key: "auth-change-password-account:\(user.email)",
+            limit: Self.rateLimit("RATE_LIMIT_LOGIN_PER_ACCOUNT", default: 10),
+            window: 60,
+            on: req
+        )
+
         // An Apple-only account has no password to change — same message as
         // a wrong one, no need to special-case it for the caller.
         guard let hash = user.passwordHash, try Bcrypt.verify(payload.currentPassword, created: hash) else {
@@ -424,5 +461,12 @@ struct AuthController: RouteCollection {
 
     private static func normalize(_ email: String) -> String {
         email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// Reads a rate-limit env var the same way `boot(routes:)` does, so a
+    /// handler's account-scoped check stays in sync with its route's
+    /// IP-scoped one without hoisting shared state onto the struct.
+    private static func rateLimit(_ key: String, default def: Int) -> Int {
+        Environment.get(key).flatMap(Int.init) ?? def
     }
 }

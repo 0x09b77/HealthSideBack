@@ -119,6 +119,30 @@ struct HealthsideTests {
         }
     }
 
+    @Test("Login is rate limited per account even when attempts are spread across different IPs")
+    func loginRateLimitedPerAccountAcrossIPs() async throws {
+        try await withApp { app in
+            let user = User(email: "spread@example.com", passwordHash: try Bcrypt.hash("supersecret"))
+            try await user.save(on: app.db)
+
+            // Each request comes from a distinct IP — the per-IP limit never
+            // trips, but the per-account limit (same target email every
+            // time) must still throttle the 11th attempt.
+            var statuses: [HTTPStatus] = []
+            for i in 0..<11 {
+                try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
+                    req.headers.replaceOrAdd(name: "X-Forwarded-For", value: "203.0.113.\(i)")
+                    try req.content.encode(AuthRequest(email: "spread@example.com", password: "wrongpass"))
+                }, afterResponse: { res async in
+                    statuses.append(res.status)
+                })
+            }
+
+            #expect(statuses[0..<10].allSatisfy { $0 == .unauthorized })
+            #expect(statuses.last == .tooManyRequests)
+        }
+    }
+
     @Test("Change password: revokes old sessions, keeps the caller signed in")
     func changePassword() async throws {
         try await withApp { app in
