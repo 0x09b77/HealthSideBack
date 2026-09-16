@@ -95,9 +95,18 @@ struct DocumentController: RouteCollection {
         if queueAvailable && !runInline {
             labResult.parseStatus = .pending
             try await labResult.save(on: req.db)
-            try await req.queue.dispatch(ExtractionJob.self, .init(labResultID: id), maxRetryCount: 3)
+            do {
+                try await req.queue.dispatch(ExtractionJob.self, .init(labResultID: id), maxRetryCount: 3)
+            } catch {
+                // Don't leave it stuck at `pending` with no job ever queued to
+                // move it — surface the failure so the client's retry button
+                // works instead of polling forever.
+                req.logger.error("Failed to dispatch ExtractionJob for lab_result \(id): \(String(reflecting: error))")
+                labResult.parseStatus = .failed
+                try? await labResult.save(on: req.db)
+            }
 
-            let accepted = UploadAcceptedResponse(documentId: id, status: .pending)
+            let accepted = UploadAcceptedResponse(documentId: id, status: labResult.parseStatus)
             return try await accepted.encodeResponse(status: .accepted, for: req)
         }
 

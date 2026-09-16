@@ -89,7 +89,17 @@ struct LabResultController: RouteCollection {
         // push. `document_id` is the lab-result id (1─1 documents).
         let documentId = try result.requireID()
         if Environment.get("REDIS_URL") != nil {
-            try await req.queue.dispatch(ExtractionJob.self, .init(labResultID: documentId), maxRetryCount: 3)
+            do {
+                try await req.queue.dispatch(ExtractionJob.self, .init(labResultID: documentId), maxRetryCount: 3)
+            } catch {
+                // The file and its metadata are already saved — don't fail the
+                // whole upload over a queue blip. Mark it failed outright
+                // instead of leaving it stuck at `pending` forever with no job
+                // ever queued to move it; POST /documents/:id/extract recovers it.
+                req.logger.error("Failed to dispatch ExtractionJob for lab_result \(documentId): \(String(reflecting: error))")
+                result.parseStatus = .failed
+                try? await result.save(on: req.db)
+            }
         }
 
         let accepted = UploadAcceptedResponse(documentId: documentId, status: result.parseStatus)

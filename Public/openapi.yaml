@@ -8,6 +8,8 @@ info:
     ~15 min) plus a long-lived refresh token (~30 days).
 
 servers:
+  - url: https://healthsideback-production.up.railway.app
+    description: Railway (production)
   - url: http://127.0.0.1:8080
     description: Local development
 

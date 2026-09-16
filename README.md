@@ -105,6 +105,11 @@ Sources/Healthside/
   Authentication/  JWT access-token authenticator
 ```
 
+## Known issues / TODO
+
+- **`RateLimiter` (`Middleware/RateLimiter.swift`) leaks memory slowly.** It never removes a key once seen — only the timestamp array inside it gets pruned to the current window, the dictionary entry itself stays forever. On a long-running process (self-hosted VPS, infrequent restarts) this grows unbounded with every distinct IP/email that ever hit a rate-limited route. Fix: periodic sweep of empty/stale keys, or swap the bare `Dictionary` for a TTL cache.
+- **`Bcrypt.verify` can throw on a corrupted `password_hash`.** `login`/`changePassword` assume it either returns `true`/`false`; if a stored hash were ever malformed (shouldn't happen — it's only ever written via `Bcrypt.hash`), the throw would propagate as a `500` instead of the intended `401`. Low priority — no known path produces a bad hash today.
+
 ## Further docs
 
 Architecture, data flow, security/privacy, compliance notes, and prompts live in the `HealthSideDocs` vault (not part of this repo).
