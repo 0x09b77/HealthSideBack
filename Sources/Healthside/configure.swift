@@ -26,13 +26,21 @@ func configure(_ app: Application) async throws {
         databaseName = Environment.get("DATABASE_NAME") ?? "vapor_database"
     }
 
+    // Managed Postgres (e.g. Railway's private network) presents a
+    // self-signed/internal certificate that isn't in the image's trusted CA
+    // store — full verification fails the handshake there. The connection is
+    // already confined to the host's private network, so skip verification
+    // rather than pin a provider-specific CA.
+    var dbTLSConfig = TLSConfiguration.makeClientConfiguration()
+    dbTLSConfig.certificateVerification = .none
+
     app.databases.use(DatabaseConfigurationFactory.postgres(configuration: .init(
         hostname: Environment.get("DATABASE_HOST") ?? "localhost",
         port: Environment.get("DATABASE_PORT").flatMap(Int.init(_:)) ?? SQLPostgresConfiguration.ianaPortNumber,
         username: Environment.get("DATABASE_USERNAME") ?? "vapor_username",
         password: Environment.get("DATABASE_PASSWORD") ?? "vapor_password",
         database: databaseName,
-        tls: .prefer(try .init(configuration: .clientDefault)))
+        tls: .prefer(try .init(configuration: dbTLSConfig)))
     ), as: .psql)
 
     // JWT signing key. The secret only ever comes from the environment —
