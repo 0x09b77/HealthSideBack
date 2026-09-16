@@ -189,6 +189,51 @@ paths:
         '429':
           $ref: '#/components/responses/TooManyRequests'
 
+  /auth/apple:
+    post:
+      tags: [Auth]
+      summary: Sign in (or sign up) with Sign in with Apple
+      description: >
+        `identityToken` is the JWT the iOS `AuthenticationServices` flow
+        returns after a native Sign in with Apple. Verified against Apple's
+        public keys. On first authorization for a given Apple account this
+        creates a passwordless, pre-verified account (or links to an
+        existing password account with the same email); later
+        authorizations just log in — Apple only sends the email once, so
+        the account must already be linkable by then. Returns a token pair
+        like `/auth/login`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppleSignInRequest'
+      responses:
+        '200':
+          description: Signed in; token pair issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: First-time Apple user with no email on the token — nothing to link or create
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Identity token failed verification (bad signature, wrong audience, expired)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          description: Sign in with Apple isn't configured on this deployment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /auth/refresh:
     post:
       tags: [Auth]
@@ -486,6 +531,13 @@ components:
         email:
           type: string
           format: email
+    AppleSignInRequest:
+      type: object
+      required: [identityToken]
+      properties:
+        identityToken:
+          type: string
+          description: JWT from the native Sign in with Apple flow (AuthenticationServices)
     ResetPasswordRequest:
       type: object
       required: [email, code, newPassword]

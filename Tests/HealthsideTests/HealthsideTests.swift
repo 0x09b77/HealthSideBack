@@ -2,6 +2,7 @@
 import VaporTesting
 import Testing
 import Fluent
+import JWTKit
 
 @Suite("App Tests with DB", .serialized)
 struct HealthsideTests {
@@ -11,6 +12,9 @@ struct HealthsideTests {
             try await configure(app)
             // Real sending is never exercised in tests — capture instead.
             app.emailProvider = CapturingEmailProvider()
+            // Never hits Apple's real endpoint — tests configure the stub's
+            // response per case via `.set(_:)`.
+            app.appleIdentityVerifier = StubAppleIdentityVerifier()
             try await app.autoMigrate()
             try await test(app)
             try await app.autoRevert()
@@ -45,8 +49,9 @@ struct HealthsideTests {
 
                 // Email is normalized to lowercase before storage.
                 let user = try await User.query(on: app.db).filter(\.$email == "alice@example.com").first()
-                #expect(user != nil)
-                #expect(try Bcrypt.verify("supersecret", created: #require(user).passwordHash))
+                let foundUser = try #require(user)
+                let hash = try #require(foundUser.passwordHash)
+                #expect(try Bcrypt.verify("supersecret", created: hash))
             })
         }
     }
@@ -488,6 +493,112 @@ struct HealthsideTests {
                 try req.content.encode(ForgotPasswordRequest(email: "nobody-reset@example.com"))
             }, afterResponse: { res async in
                 #expect(res.status == .noContent)
+            })
+        }
+    }
+
+    // MARK: - Sign in with Apple
+
+    @Test("Apple sign-in creates a verified, passwordless account on first authorization")
+    func appleSignInCreatesAccount() async throws {
+        try await withApp { app in
+            let stub = try #require(app.appleIdentityVerifier as? StubAppleIdentityVerifier)
+            await stub.set(.success(subject: "apple-subject-1", email: "apple-new@example.com"))
+
+            var tokens: TokenResponse!
+            try await app.testing().test(.POST, "auth/apple", beforeRequest: { req in
+                try req.content.encode(AppleSignInRequest(identityToken: "whatever"))
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                tokens = try res.content.decode(TokenResponse.self)
+            })
+            #expect(!tokens.accessToken.isEmpty)
+
+            let user = try #require(await User.query(on: app.db).filter(\.$email == "apple-new@example.com").first())
+            #expect(user.emailVerified)
+            #expect(user.passwordHash == nil)
+
+            let link = try #require(await OAuthIdentity.query(on: app.db)
+                .filter(\.$providerUserId == "apple-subject-1")
+                .first())
+            #expect(link.provider == "apple")
+        }
+    }
+
+    @Test("Apple sign-in logs an already-linked user back in without needing the email again")
+    func appleSignInExistingLink() async throws {
+        try await withApp { app in
+            let stub = try #require(app.appleIdentityVerifier as? StubAppleIdentityVerifier)
+            await stub.set(.success(subject: "apple-subject-2", email: "apple-repeat@example.com"))
+            try await app.testing().test(.POST, "auth/apple", beforeRequest: { req in
+                try req.content.encode(AppleSignInRequest(identityToken: "first"))
+            })
+
+            // Apple omits the email on subsequent authorizations — must
+            // still work purely off the existing link.
+            await stub.set(.success(subject: "apple-subject-2", email: nil))
+            try await app.testing().test(.POST, "auth/apple", beforeRequest: { req in
+                try req.content.encode(AppleSignInRequest(identityToken: "second"))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            let userCount = try await User.query(on: app.db).filter(\.$email == "apple-repeat@example.com").count()
+            #expect(userCount == 1)
+        }
+    }
+
+    @Test("Apple sign-in auto-links to an existing password account with the same email")
+    func appleSignInLinksExistingPasswordAccount() async throws {
+        try await withApp { app in
+            _ = try await authenticate(app, email: "hybrid@example.com")
+
+            let stub = try #require(app.appleIdentityVerifier as? StubAppleIdentityVerifier)
+            await stub.set(.success(subject: "apple-subject-3", email: "hybrid@example.com"))
+            try await app.testing().test(.POST, "auth/apple", beforeRequest: { req in
+                try req.content.encode(AppleSignInRequest(identityToken: "whatever"))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            // Still exactly one user — Apple linked to the existing account,
+            // it didn't create a duplicate.
+            let userCount = try await User.query(on: app.db).filter(\.$email == "hybrid@example.com").count()
+            #expect(userCount == 1)
+
+            // Password login still works — linking didn't touch the password.
+            try await app.testing().test(.POST, "auth/login", beforeRequest: { req in
+                try req.content.encode(AuthRequest(email: "hybrid@example.com", password: "supersecret"))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+        }
+    }
+
+    @Test("Apple sign-in rejects an invalid identity token")
+    func appleSignInInvalidToken() async throws {
+        try await withApp { app in
+            let stub = try #require(app.appleIdentityVerifier as? StubAppleIdentityVerifier)
+            await stub.set(.failure(AppleSignInError.wrongAudience))
+
+            try await app.testing().test(.POST, "auth/apple", beforeRequest: { req in
+                try req.content.encode(AppleSignInRequest(identityToken: "garbage"))
+            }, afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+        }
+    }
+
+    @Test("Apple sign-in for a brand-new user without an email is rejected")
+    func appleSignInMissingEmail() async throws {
+        try await withApp { app in
+            let stub = try #require(app.appleIdentityVerifier as? StubAppleIdentityVerifier)
+            await stub.set(.success(subject: "apple-subject-no-email", email: nil))
+
+            try await app.testing().test(.POST, "auth/apple", beforeRequest: { req in
+                try req.content.encode(AppleSignInRequest(identityToken: "whatever"))
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
             })
         }
     }
@@ -934,5 +1045,37 @@ actor CapturingEmailProvider: EmailProvider {
     func lastCode(to: String) -> String? {
         guard let text = sent[to]?.last else { return nil }
         return text.range(of: #"\d{6}"#, options: .regularExpression).map { String(text[$0]) }
+    }
+}
+
+/// Stands in for a real Sign in with Apple verification (which would hit
+/// Apple's network) — tests configure what the "verified" token looks like,
+/// or make it throw, via `set(_:)`.
+actor StubAppleIdentityVerifier: AppleIdentityVerifying {
+    enum Behavior {
+        case success(subject: String, email: String?)
+        case failure(any Error)
+    }
+
+    private var behavior: Behavior = .failure(AppleSignInError.wrongAudience)
+
+    func set(_ behavior: Behavior) {
+        self.behavior = behavior
+    }
+
+    func verify(_ identityToken: String) async throws -> AppleIdentityToken {
+        switch behavior {
+        case .success(let subject, let email):
+            return AppleIdentityToken(
+                issuer: .init(value: "https://appleid.apple.com"),
+                audience: .init(value: "test.healthside.bundle"),
+                expires: .init(value: Date().addingTimeInterval(300)),
+                issuedAt: .init(value: Date()),
+                subject: .init(value: subject),
+                email: email
+            )
+        case .failure(let error):
+            throw error
+        }
     }
 }

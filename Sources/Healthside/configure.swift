@@ -59,8 +59,10 @@ func configure(_ app: Application) async throws {
     // Order respects foreign keys (parent before child) — see R-Data-Model.
     app.migrations.add(CreateUser())
     app.migrations.add(AddEmailVerifiedToUsers())
+    app.migrations.add(MakePasswordHashOptionalOnUsers())
     app.migrations.add(CreateEmailVerificationCode())
     app.migrations.add(CreatePasswordResetCode())
+    app.migrations.add(CreateOAuthIdentity())
     app.migrations.add(CreateRefreshToken())
     app.migrations.add(CreateDeviceToken())
     app.migrations.add(CreateLabResult())
@@ -77,6 +79,14 @@ func configure(_ app: Application) async throws {
         app.emailProvider = ResendProvider(client: app.client, apiKey: resendKey, from: from, logger: app.logger)
     } else if app.environment != .testing {
         app.logger.warning("RESEND_API_KEY not set — verification emails will only be logged")
+    }
+
+    // Sign in with Apple (see R-Auth). `appleIdentityVerifier` stays nil
+    // without a bundle ID — `/auth/apple` responds 503 until it's set.
+    if let bundleID = Environment.get("APPLE_BUNDLE_ID") {
+        app.appleIdentityVerifier = AppleIdentityVerifier(client: app.client, expectedAudience: bundleID)
+    } else if app.environment != .testing {
+        app.logger.warning("APPLE_BUNDLE_ID not set — /auth/apple will respond 503")
     }
 
     // Ensure the local file-storage directory exists before serving uploads.

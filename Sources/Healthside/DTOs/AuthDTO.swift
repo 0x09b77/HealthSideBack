@@ -38,6 +38,13 @@ extension ChangePasswordRequest: Validatable {
     }
 }
 
+/// Body of `POST /auth/apple`. `identityToken` is the JWT the iOS
+/// `AuthenticationServices` flow hands back after a native Sign in with
+/// Apple.
+struct AppleSignInRequest: Content {
+    let identityToken: String
+}
+
 /// Returned on successful login and refresh.
 struct TokenResponse: Content {
     let accessToken: String

@@ -15,9 +15,10 @@ final class User: Model, Authenticatable, @unchecked Sendable {
     @Field(key: "email")
     var email: String
 
-    /// Bcrypt hash of the password. Never serialized to the client.
-    @Field(key: "password_hash")
-    var passwordHash: String
+    /// Bcrypt hash of the password. Never serialized to the client. `nil`
+    /// for an account created via Sign in with Apple that has never set one.
+    @OptionalField(key: "password_hash")
+    var passwordHash: String?
 
     /// Gates login (see R-Auth). `/auth/register` always creates this as
     /// `false`; the default of `true` here is for code that constructs a
@@ -34,7 +35,7 @@ final class User: Model, Authenticatable, @unchecked Sendable {
 
     init() { }
 
-    init(id: UUID? = nil, email: String, passwordHash: String, emailVerified: Bool = true) {
+    init(id: UUID? = nil, email: String, passwordHash: String?, emailVerified: Bool = true) {
         self.id = id
         self.email = email
         self.passwordHash = passwordHash

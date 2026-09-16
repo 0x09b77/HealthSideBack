@@ -78,6 +78,8 @@ docker compose exec db createdb -U vapor_username vapor_test
 | `RATE_LIMIT_RESEND_VERIFICATION` | `5` | requests per client IP per 60s window |
 | `RATE_LIMIT_FORGOT_PASSWORD` | `5` | requests per client IP per 60s window |
 | `RATE_LIMIT_RESET_PASSWORD` | `10` | requests per client IP per 60s window |
+| `APPLE_BUNDLE_ID` | unset (`/auth/apple` responds 503) | the iOS app's bundle ID — must match the identity token's `aud` claim |
+| `RATE_LIMIT_APPLE_SIGNIN` | `10` | requests per client IP per 60s window |
 | `DATABASE_HOST` / `PORT` / `USERNAME` / `PASSWORD` / `NAME` | `localhost` / `5432` / `vapor_username` / `vapor_password` / `vapor_database` | matches the `db` service in `docker-compose.yml` |
 | `DATABASE_NAME_TEST` | `vapor_test` | used only when `app.environment == .testing` |
 | `STORAGE_PATH` | `<working dir>/storage/lab-results/` | where uploaded files are written on disk |
