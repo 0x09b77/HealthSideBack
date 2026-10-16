@@ -25,8 +25,9 @@ struct ExtractionJob: AsyncJob {
         let provider = AnthropicProvider(
             client: app.client,
             apiKey: apiKey,
-            modelName: "claude-haiku-4-5",
-            logger: context.logger
+            modelName: LLMModels.extraction,
+            logger: context.logger,
+            effort: ExtractionPrompt.effort
         )
         let service = ExtractionService(
             provider: provider,
@@ -34,7 +35,14 @@ struct ExtractionJob: AsyncJob {
             storage: FileStorage(for: app),
             logger: context.logger
         )
-        try await service.extract(labResult: labResult)
+        do {
+            try await service.extract(labResult: labResult)
+        } catch let error as LLMError where !error.isRetryable {
+            // `extract` has already marked the file `failed`. Returning instead
+            // of rethrowing skips the queue's retries — each would bill the
+            // model again for a guaranteed-identical failure.
+            context.logger.error("ExtractionJob: non-retryable failure for \(payload.labResultID): \(error)")
+        }
     }
 
     /// Called after retries are exhausted — mark the file as failed so the

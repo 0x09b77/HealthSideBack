@@ -70,7 +70,8 @@ docker compose exec db createdb -U vapor_username vapor_test
 |---|---|---|
 | `JWT_SECRET` | insecure dev secret (non-prod only) | required in production, refuses to boot without it |
 | `LLM_API_KEY` | — | Claude API key, required for extraction/checkup |
-| `CHECKUP_MODEL` | `claude-haiku-4-5` | model used for checkup generation |
+| `EXTRACTION_MODEL` | `claude-haiku-5-5` | model used for document extraction |
+| `CHECKUP_MODEL` | `claude-haiku-5-5` | model used for checkup generation |
 | `REDIS_URL` | unset (queue disabled) | e.g. `redis://localhost:6379` |
 | `RESEND_API_KEY` | unset (emails only logged) | required to actually send verification codes |
 | `MAIL_FROM` | `Healthside <onboarding@resend.dev>` | sandbox address unless a domain is verified on Resend |
@@ -86,7 +87,7 @@ docker compose exec db createdb -U vapor_username vapor_test
 | `STORAGE_PATH` | `<working dir>/storage/lab-results/` | where uploaded files are written on disk |
 | `RATE_LIMIT_LOGIN` / `RATE_LIMIT_REGISTER` | `10` | requests per client IP per 60s window |
 
-The extraction model is currently hardcoded to `claude-haiku-4-5` in `ExtractionJob.swift`, not configurable via env.
+Model defaults live in `LLMModels` (`LLM/LLMProvider.swift`); effort levels are set per pipeline next to each prompt (`ExtractionPrompt.effort`, `CheckupPrompt.effort`).
 
 `.env.example` only lists the ones you're expected to set for local dev (`JWT_SECRET`, `LLM_API_KEY`, `REDIS_URL`); the rest have working defaults. Secrets live in the environment only — never in code, never committed.
 

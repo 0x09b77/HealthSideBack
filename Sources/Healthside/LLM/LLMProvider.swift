@@ -19,6 +19,19 @@ struct LLMResult: Sendable {
     let stopReason: String?
 }
 
+/// Model IDs per pipeline, overridable via env so a model swap needs no
+/// code change.
+enum LLMModels {
+    static var extraction: String { Environment.get("EXTRACTION_MODEL") ?? "claude-haiku-5-5" }
+    static var checkup: String { Environment.get("CHECKUP_MODEL") ?? "claude-haiku-5-5" }
+}
+
+/// How much the model thinks before answering (Anthropic `output_config.effort`).
+/// Thinking counts toward `max_tokens` and is billed as output.
+enum LLMEffort: String, Encodable, Sendable {
+    case low, medium, high, xhigh, max
+}
+
 /// Provider-agnostic LLM interface. Implementations live behind this so the
 /// backing model/provider is a config choice (see R-LLM-Providers).
 protocol LLMProvider: Sendable {
@@ -41,6 +54,19 @@ enum LLMError: Error, CustomStringConvertible {
     /// Generation hit `max_tokens`, so the payload is cut off mid-structure.
     /// Retrying is pointless — the limit has to go up.
     case outputTruncated(outputTokens: Int)
+    /// The provider's safety classifier declined the request (`stop_reason:
+    /// "refusal"`). The same input will be declined again.
+    case refused(category: String?)
+
+    /// Whether running the same request again could succeed. Queue jobs use
+    /// this to avoid paying for retries that are guaranteed to fail.
+    var isRetryable: Bool {
+        switch self {
+        case .requestFailed(let status, _): return status == 408 || status == 429 || status >= 500
+        case .emptyResponse: return true
+        case .notConfigured, .outputTruncated, .refused: return false
+        }
+    }
 
     var description: String {
         switch self {
@@ -49,6 +75,8 @@ enum LLMError: Error, CustomStringConvertible {
         case .emptyResponse: return "LLM returned no text content"
         case .outputTruncated(let tokens):
             return "LLM output was truncated at the \(tokens)-token limit; raise max_tokens for this document"
+        case .refused(let category):
+            return "LLM declined the request (refusal, category: \(category ?? "unspecified"))"
         }
     }
 }

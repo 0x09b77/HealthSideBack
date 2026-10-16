@@ -50,7 +50,10 @@ struct CheckupService {
         let result = try await provider.complete(
             system: CheckupPrompt.system,
             content: [.text("User biomarkers:\n\n\(input)")],
-            maxTokens: 4096
+            // Adaptive thinking spends from this same budget, and the report
+            // repeats every marker with its history — 4096 left no headroom.
+            maxTokens: 16_000,
+            jsonSchema: CheckupSchema.schema
         )
         logger.info("Checkup tokens in=\(result.inputTokens) out=\(result.outputTokens) model=\(result.model)")
 
@@ -102,16 +105,11 @@ struct CheckupService {
 
     // MARK: - Parsing
 
+    /// Structured outputs guarantee schema-valid JSON; a failure here is a
+    /// provider-side problem, not a formatting slip to clean up.
     private static func parseJSON(_ text: String, logger: Logger) throws -> JSONValue {
-        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleaned.hasPrefix("```") {
-            cleaned = cleaned.replacingOccurrences(of: "```json", with: "")
-                .replacingOccurrences(of: "```", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        guard let data = cleaned.data(using: .utf8),
-              let value = try? JSONDecoder().decode(JSONValue.self, from: data) else {
-            logger.warning("Checkup JSON parse failed; first 200 chars: \(cleaned.prefix(200))")
+        guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data(text.utf8)) else {
+            logger.warning("Checkup JSON parse failed; first 200 chars: \(text.prefix(200))")
             throw Abort(.internalServerError, reason: "Checkup output was not valid JSON")
         }
         return value

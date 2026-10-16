@@ -1,4 +1,4 @@
-openapi: 3.1.0
+openapi: 3.0.3
 info:
   title: Healthside API
   version: 0.1.0
@@ -15,13 +15,15 @@ servers:
 
 tags:
   - name: Auth
-    description: Registration, login, token refresh and logout
+    description: Registration, email verification, login (password or Sign in with Apple), password reset/change, token refresh and logout
   - name: User
     description: Current user profile
   - name: Lab results
     description: Upload, list, download and delete lab-result files
   - name: Documents
     description: Extraction status and parsed document envelopes
+  - name: Checkup
+    description: Holistic report over all of the user's extracted biomarkers
 
 paths:
   /auth/register:
@@ -330,8 +332,9 @@ paths:
       description: >
         Accepts PDF, JPEG, PNG, TXT, DOCX, HEIC or legacy DOC (validated by
         magic bytes, not by the filename or Content-Type). Max 20 MB. HEIC and
-        DOC are stored but not extractable — POST /documents/:id/extract
-        answers `415` for those until the client re-uploads a converted file.
+        DOC are stored but not extractable — extracting them ends in status
+        `failed` (or `415` with `?sync=true`); the client should convert
+        to JPEG/PDF/DOCX before uploading.
 
 
         Only saves the file — does **not** queue extraction. The client
@@ -507,7 +510,11 @@ paths:
           description: Debugging only — runs extraction inline instead of queuing it
       responses:
         '202':
-          description: Queued — extraction runs in the background worker (`REDIS_URL` set, no `?sync=true`)
+          description: >
+            Queued — extraction runs in the background worker (`REDIS_URL`
+            set, no `?sync=true`). Poll GET /documents/{id}. If the job
+            couldn't be queued, `status` is already `failed` — call this
+            endpoint again to retry.
           content:
             application/json:
               schema:
@@ -529,6 +536,68 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415':
+          description: Inline run only — the file type can't be extracted (HEIC, legacy DOC, unreadable text)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: LLM_API_KEY isn't configured on this deployment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /checkup:
+    get:
+      tags: [Checkup]
+      summary: The latest saved checkup report (cached, no LLM call)
+      description: >
+        Returns the most recent stored report. `isFresh` is false when the
+        user's biomarkers changed since it was generated — call
+        POST /checkup/refresh to rebuild it.
+      responses:
+        '200':
+          description: Latest checkup
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckupResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No checkup generated yet — call POST /checkup/refresh
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: LLM_API_KEY isn't configured on this deployment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /checkup/refresh:
+    post:
+      tags: [Checkup]
+      summary: Rebuild the checkup if the data changed, otherwise return the cached one
+      description: >
+        Compares the fingerprint of the user's current biomarker set with the
+        latest report. On a match the cached report is returned without an
+        LLM call; otherwise a new report is generated synchronously (blocks
+        on the model) and stored — older reports are kept as history.
+      responses:
+        '200':
+          description: Current checkup (cached or freshly generated)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckupResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: No biomarkers yet — upload and extract a lab result first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '503':
           description: LLM_API_KEY isn't configured on this deployment
           content:
@@ -541,9 +610,6 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-
-  security:
-    - bearerAuth: []
 
   schemas:
     AuthRequest:
@@ -713,8 +779,9 @@ components:
             this isn't a medical document at all (junk/unreadable content).
         reportDate:
           type: string
-          format: date
+          format: date-time
           nullable: true
+          description: Specimen/exam date (midnight UTC); null until done or if absent
         provider:
           type: string
           nullable: true
@@ -729,6 +796,38 @@ components:
           nullable: true
           description: Extraction envelope; null until done
         uploadedAt:
+          type: string
+          format: date-time
+          nullable: true
+    CheckupResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        report:
+          type: object
+          description: >
+            The report in the fixed checkup schema (summary, biomarkers,
+            categories, flags, recommendations, confidence, disclaimers)
+        model:
+          type: string
+          example: claude-haiku-5-5
+        promptVersion:
+          type: string
+          example: checkup-v0.1
+        schemaVersion:
+          type: string
+          example: checkup-schema-v1
+        sourceDocumentIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        isFresh:
+          type: boolean
+          description: False when the user's biomarkers changed since this report was generated
+        createdAt:
           type: string
           format: date-time
           nullable: true

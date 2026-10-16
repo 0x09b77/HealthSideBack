@@ -41,10 +41,11 @@ struct ExtractionService {
         let result = try await provider.complete(
             system: ExtractionPrompt.system,
             content: content,
-            // Real lab panels run to dozens of biomarkers, and each one costs
-            // ~90 tokens in the strict schema — 2048 truncated them mid-JSON.
-            // This is a ceiling, not a spend: we're billed for what's generated.
-            maxTokens: 16_000,
+            // Real lab panels run to dozens of biomarkers at ~90+ tokens each
+            // in the strict schema, and on Haiku 5.5 adaptive thinking spends
+            // from the same budget. This is a ceiling, not a spend: we're
+            // billed for what's generated.
+            maxTokens: 32_000,
             jsonSchema: ExtractionSchema.schema
         )
         logger.info("Extraction tokens in=\(result.inputTokens) out=\(result.outputTokens) model=\(result.model)")
@@ -92,7 +93,7 @@ struct ExtractionService {
 
     private func buildContent(for labResult: LabResult) throws -> [LLMContent] {
         let data = try storage.read(key: labResult.storageKey)
-        let instruction = LLMContent.text("Extract this document into the required JSON. Output JSON only.")
+        let instruction = LLMContent.text("Extract this document.")
 
         guard let type = AllowedFileType(mimeType: labResult.mimeType) else {
             throw Abort(.unsupportedMediaType, reason: "Unknown type for extraction: \(labResult.mimeType)")
@@ -119,21 +120,13 @@ struct ExtractionService {
 
     // MARK: - Parsing
 
+    /// Structured outputs guarantee schema-valid JSON, so a parse failure here
+    /// means a provider-side problem, not a formatting slip to clean up.
     private func parseEnvelope(_ text: String) throws -> JSONValue {
-        // Tolerate accidental ```json fences despite the "JSON only" instruction.
-        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleaned.hasPrefix("```") {
-            cleaned = cleaned.replacingOccurrences(of: "```json", with: "")
-                .replacingOccurrences(of: "```", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        guard let data = cleaned.data(using: .utf8) else {
-            throw Abort(.internalServerError, reason: "Extraction output was not valid text")
-        }
         do {
-            return try JSONDecoder().decode(JSONValue.self, from: data)
+            return try JSONDecoder().decode(JSONValue.self, from: Data(text.utf8))
         } catch {
-            logger.warning("Extraction JSON parse failed; first 200 chars: \(cleaned.prefix(200))")
+            logger.warning("Extraction JSON parse failed; first 200 chars: \(text.prefix(200))")
             throw Abort(.internalServerError, reason: "Extraction output was not valid JSON")
         }
     }

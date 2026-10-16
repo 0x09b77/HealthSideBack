@@ -9,17 +9,21 @@ struct AnthropicProvider: LLMProvider {
     let apiKey: String
     let modelName: String
     let logger: Logger
+    /// Sent explicitly rather than relying on the model's default, so a model
+    /// swap doesn't silently change how much (billed) thinking happens.
+    var effort: LLMEffort? = nil
 
     private let endpoint = "https://api.anthropic.com/v1/messages"
     private let apiVersion = "2023-06-01"
 
     func complete(system: String, content: [LLMContent], maxTokens: Int, jsonSchema: JSONValue?) async throws -> LLMResult {
+        let format = jsonSchema.map { Request.OutputConfig.Format(schema: $0) }
         let requestBody = Request(
             model: modelName,
             max_tokens: maxTokens,
             system: system,
             messages: [.init(role: "user", content: content.map(Block.init))],
-            output_config: jsonSchema.map { Request.OutputConfig(format: .init(schema: $0)) }
+            output_config: (effort != nil || format != nil) ? .init(effort: effort, format: format) : nil
         )
 
         var headers = HTTPHeaders()
@@ -45,6 +49,16 @@ struct AnthropicProvider: LLMProvider {
         }
 
         let decoded = try response.content.decode(APIResponse.self)
+
+        // A safety-classifier decline is a normal 200 — check it before
+        // reading content, which may be empty or partial.
+        if decoded.stop_reason == "refusal" {
+            let category = decoded.stop_details?.category
+            logger.warning("LLM request declined (refusal, category: \(category ?? "unspecified"))")
+            throw LLMError.refused(category: category)
+        }
+
+        // Responses can open with `thinking` blocks — only `text` blocks are the answer.
         let text = decoded.content
             .filter { $0.type == "text" }
             .compactMap { $0.text }
@@ -75,7 +89,8 @@ struct AnthropicProvider: LLMProvider {
         let max_tokens: Int
         let system: String
         let messages: [Message]
-        /// Structured outputs (json_schema). Omitted from the wire when nil.
+        /// Effort and/or structured outputs (json_schema). Omitted from the
+        /// wire when nil, as are its nil members.
         let output_config: OutputConfig?
 
         struct Message: Encodable {
@@ -84,7 +99,8 @@ struct AnthropicProvider: LLMProvider {
         }
 
         struct OutputConfig: Encodable {
-            let format: Format
+            let effort: LLMEffort?
+            let format: Format?
             struct Format: Encodable {
                 let type = "json_schema"
                 let schema: JSONValue
@@ -128,9 +144,14 @@ struct AnthropicProvider: LLMProvider {
     private struct APIResponse: Content {
         let model: String
         let stop_reason: String?
+        /// Populated only when `stop_reason == "refusal"`.
+        let stop_details: StopDetails?
         let content: [ContentBlock]
         let usage: Usage
 
+        struct StopDetails: Content {
+            let category: String?
+        }
         struct ContentBlock: Content {
             let type: String
             let text: String?

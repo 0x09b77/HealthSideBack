@@ -117,8 +117,9 @@ struct DocumentController: RouteCollection {
         let provider = AnthropicProvider(
             client: req.client,
             apiKey: apiKey,
-            modelName: "claude-haiku-4-5",
-            logger: req.logger
+            modelName: LLMModels.extraction,
+            logger: req.logger,
+            effort: ExtractionPrompt.effort
         )
         let service = ExtractionService(
             provider: provider,

@@ -45,12 +45,12 @@ struct CheckupController: RouteCollection {
         guard let apiKey = Environment.get("LLM_API_KEY") else {
             throw Abort(.serviceUnavailable, reason: "LLM_API_KEY is not set")
         }
-        let model = Environment.get("CHECKUP_MODEL") ?? "claude-haiku-4-5"
         let provider = AnthropicProvider(
             client: req.client,
             apiKey: apiKey,
-            modelName: model,
-            logger: req.logger
+            modelName: LLMModels.checkup,
+            logger: req.logger,
+            effort: CheckupPrompt.effort
         )
         return CheckupService(provider: provider, db: req.db, logger: req.logger)
     }
