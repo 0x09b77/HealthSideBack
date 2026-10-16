@@ -60,13 +60,16 @@ struct DocumentController: RouteCollection {
         return try DocumentView(labResult: labResult, document: document)
     }
 
-    /// `POST /documents/:id/extract` — re-run extraction for a document the user
-    /// already uploaded (the "Retry" button on a failed document).
+    /// `POST /documents/:id/extract` — start (or retry) extraction for an
+    /// already-uploaded document. Upload itself doesn't queue extraction (see
+    /// R-Files) — this is the only entry point into it, for a fresh
+    /// `uploaded` document (the "AI check" button) just as much as for
+    /// retrying a `failed` one. Re-uploading the same file can't substitute
+    /// for a retry — dedup rejects it with 409.
     ///
-    /// Re-uploading the same file can't work — dedup rejects it with 409 — so this
-    /// is the only retry path. Mirrors the upload contract: queues the job and
-    /// answers `202 pending`, so the client polls exactly as it does after upload.
-    /// `?sync=true` runs it inline instead (debugging aid; blocks on the LLM).
+    /// Queues the job and answers `202 pending`, so the client polls the same
+    /// way after either an upload or a retry. `?sync=true` runs it inline
+    /// instead (debugging aid; blocks on the LLM).
     @Sendable
     func extract(req: Request) async throws -> Response {
         let userID = try req.auth.require(User.self).requireID()

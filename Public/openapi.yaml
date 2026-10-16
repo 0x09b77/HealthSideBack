@@ -328,8 +328,15 @@ paths:
       tags: [Lab results]
       summary: Upload a lab-result file
       description: >
-        Accepts PDF, JPEG, PNG or HEIC (validated by magic bytes, not by the
-        filename or Content-Type). Max 20 MB.
+        Accepts PDF, JPEG, PNG, TXT, DOCX, HEIC or legacy DOC (validated by
+        magic bytes, not by the filename or Content-Type). Max 20 MB. HEIC and
+        DOC are stored but not extractable — POST /documents/:id/extract
+        answers `415` for those until the client re-uploads a converted file.
+
+
+        Only saves the file — does **not** queue extraction. The client
+        starts analysis explicitly via POST /documents/:id/extract (the
+        "AI check" action).
       requestBody:
         required: true
         content:
@@ -345,8 +352,8 @@ paths:
                   type: string
                   description: Optional human label, e.g. "Helix, April 2026"
       responses:
-        '202':
-          description: Accepted — file stored, queued for background extraction
+        '201':
+          description: File stored, status `uploaded` — nothing queued yet
           content:
             application/json:
               schema:
@@ -467,6 +474,66 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /documents/{id}/extract:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: The document id (== lab-result id)
+    post:
+      tags: [Documents]
+      summary: Start (or retry) extraction — the "AI check" action
+      description: >
+        The only entry point into extraction. Upload alone never queues it
+        (see the `uploaded` status) — the client calls this explicitly, both
+        for a fresh `uploaded` document and to retry a `failed` one.
+        Re-uploading the same file can't substitute for a retry; dedup
+        rejects it with `409`.
+
+
+        `?sync=true` runs extraction inline and blocks the request instead of
+        queuing it — a debugging aid, not for client use (risks a request
+        timeout).
+      parameters:
+        - name: sync
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: Debugging only — runs extraction inline instead of queuing it
+      responses:
+        '202':
+          description: Queued — extraction runs in the background worker (`REDIS_URL` set, no `?sync=true`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadAcceptedResponse'
+        '200':
+          description: Extraction ran inline (`?sync=true`, or no queue configured) — envelope included
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Extraction is already in progress for this document
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: LLM_API_KEY isn't configured on this deployment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
 components:
   securitySchemes:
@@ -606,8 +673,11 @@ components:
           nullable: true
     ParseStatus:
       type: string
-      enum: [pending, processing, done, failed]
-      description: Extraction pipeline status of the file
+      enum: [uploaded, pending, processing, done, failed]
+      description: >
+        Extraction pipeline status of the file. `uploaded` — saved, nothing
+        queued; extraction starts only on POST /documents/:id/extract (the
+        "AI check" action), never automatically on upload.
     UploadAcceptedResponse:
       type: object
       properties:
@@ -636,9 +706,11 @@ components:
           nullable: true
         documentType:
           type: string
-          enum: [lab_panel, imaging_report, consult_note, other]
+          enum: [lab_panel, imaging_report, consult_note, other, unrelated]
           nullable: true
-          description: null until extraction is done
+          description: >
+            Null until extraction is done. `unrelated` — the model determined
+            this isn't a medical document at all (junk/unreadable content).
         reportDate:
           type: string
           format: date

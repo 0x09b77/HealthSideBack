@@ -807,7 +807,7 @@ struct HealthsideTests {
             try req.content.encode(UploadRequest(file: file, label: label), as: .formData)
         }, afterResponse: { res async throws in
             status = res.status
-            if res.status == .accepted {
+            if res.status == .created {
                 decoded = try res.content.decode(UploadAcceptedResponse.self)
             }
         })
@@ -826,19 +826,20 @@ struct HealthsideTests {
         return view
     }
 
-    @Test("Upload a valid PDF (202 pending), list it, download it, delete it")
+    @Test("Upload a valid PDF (201 uploaded, no auto-extraction), list it, download it, delete it")
     func labResultLifecycle() async throws {
         try await withApp { app in
             let tokens = try await authenticate(app, email: "jane@example.com")
 
             let uploaded = try await upload(app, token: tokens.accessToken, bytes: Self.pdfBytes, filename: "analiz.pdf", label: "Helix")
-            #expect(uploaded.status == .accepted)
+            #expect(uploaded.status == .created)
             let documentId = try #require(uploaded.body).documentId
-            #expect(try #require(uploaded.body).status == .pending)
+            #expect(try #require(uploaded.body).status == .uploaded)
 
-            // Document view reflects the pending status and file metadata.
+            // Document view reflects the uploaded status and file metadata —
+            // upload alone never queues extraction (see R-Files).
             let view = try await documentView(app, token: tokens.accessToken, id: documentId)
-            #expect(view.status == .pending)
+            #expect(view.status == .uploaded)
             #expect(view.mimeType == "application/pdf")
             #expect(view.fileSize == Self.pdfBytes.count)
             #expect(view.label == "Helix")
@@ -852,7 +853,7 @@ struct HealthsideTests {
                 let list = try res.content.decode([LabResultResponse].self)
                 #expect(list.count == 1)
                 #expect(list.first?.id == documentId)
-                #expect(list.first?.parseStatus == .pending)
+                #expect(list.first?.parseStatus == .uploaded)
             })
 
             // Download returns the original bytes as an attachment.
@@ -886,21 +887,29 @@ struct HealthsideTests {
         try await withApp { app in
             let tokens = try await authenticate(app, email: "dup@example.com")
             let first = try await upload(app, token: tokens.accessToken, bytes: Self.pdfBytes, filename: "a.pdf")
-            #expect(first.status == .accepted)
+            #expect(first.status == .created)
             let second = try await upload(app, token: tokens.accessToken, bytes: Self.pdfBytes, filename: "a-again.pdf")
             #expect(second.status == .conflict)
         }
     }
 
-    @Test("Retry on a document already being processed is rejected")
+    @Test("A second extract call while one is already in flight is rejected")
     func retryWhileInFlightIsRejected() async throws {
         try await withApp { app in
             let tokens = try await authenticate(app, email: "retry@example.com")
             let uploaded = try await upload(app, token: tokens.accessToken, bytes: Self.pdfBytes, filename: "a.pdf")
             let documentId = try #require(uploaded.body).documentId
 
-            // Fresh upload sits at `pending`, so a retry must not stack a second
-            // run (which would call — and bill — the model twice).
+            // First call moves it out of `uploaded` into `pending` (queued,
+            // never actually consumed by a worker in tests — see R-Flow).
+            try await app.testing().test(.POST, "documents/\(documentId)/extract", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: tokens.accessToken)
+            }, afterResponse: { res async in
+                #expect(res.status == .accepted)
+            })
+
+            // ...so a second call while it's still in flight must not stack a
+            // second run (which would call — and bill — the model twice).
             try await app.testing().test(.POST, "documents/\(documentId)/extract", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: tokens.accessToken)
             }, afterResponse: { res async in
@@ -953,7 +962,7 @@ struct HealthsideTests {
         try await withApp { app in
             let tokens = try await authenticate(app, email: "fmt-\(filename)@example.com")
             let result = try await upload(app, token: tokens.accessToken, bytes: bytes, filename: filename)
-            #expect(result.status == .accepted)
+            #expect(result.status == .created)
             let view = try await documentView(app, token: tokens.accessToken, id: #require(result.body).documentId)
             #expect(view.mimeType == expectedMime)
         }
@@ -965,7 +974,7 @@ struct HealthsideTests {
             let tokens = try await authenticate(app, email: "spoof@example.com")
             // JPEG bytes but a .pdf name — must be stored as image/jpeg.
             let result = try await upload(app, token: tokens.accessToken, bytes: Self.jpegBytes, filename: "totally.pdf")
-            #expect(result.status == .accepted)
+            #expect(result.status == .created)
             let view = try await documentView(app, token: tokens.accessToken, id: #require(result.body).documentId)
             #expect(view.mimeType == "image/jpeg")
         }

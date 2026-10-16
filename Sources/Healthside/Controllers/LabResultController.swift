@@ -1,7 +1,6 @@
 import Crypto
 import Fluent
 import Foundation
-import Queues
 import Vapor
 
 struct LabResultController: RouteCollection {
@@ -84,26 +83,13 @@ struct LabResultController: RouteCollection {
             throw error
         }
 
-        // Upload is async: the file is stored and marked pending; extraction runs
-        // in the background worker. Client polls GET /documents/:id or waits for a
-        // push. `document_id` is the lab-result id (1─1 documents).
+        // Upload only saves the file — it no longer starts extraction on its
+        // own (see R-Files). `document_id` is the lab-result id (1─1
+        // documents); the client requests analysis explicitly via
+        // POST /documents/:id/extract (the "AI check" button).
         let documentId = try result.requireID()
-        if Environment.get("REDIS_URL") != nil {
-            do {
-                try await req.queue.dispatch(ExtractionJob.self, .init(labResultID: documentId), maxRetryCount: 3)
-            } catch {
-                // The file and its metadata are already saved — don't fail the
-                // whole upload over a queue blip. Mark it failed outright
-                // instead of leaving it stuck at `pending` forever with no job
-                // ever queued to move it; POST /documents/:id/extract recovers it.
-                req.logger.error("Failed to dispatch ExtractionJob for lab_result \(documentId): \(String(reflecting: error))")
-                result.parseStatus = .failed
-                try? await result.save(on: req.db)
-            }
-        }
-
         let accepted = UploadAcceptedResponse(documentId: documentId, status: result.parseStatus)
-        return try await accepted.encodeResponse(status: .accepted, for: req)
+        return try await accepted.encodeResponse(status: .created, for: req)
     }
 
     /// `GET /lab-results` — metadata of the current user's own results, newest first.

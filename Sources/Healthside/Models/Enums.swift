@@ -1,8 +1,12 @@
 import Foundation
 
 /// Extraction pipeline status of an uploaded file (see R-Flow/System-Flow).
-/// `processing` marks that a worker has picked the job up.
+/// `uploaded` — file saved, nothing queued; extraction starts only when the
+/// user explicitly requests it (`POST /documents/:id/extract`, the "AI check"
+/// button), not automatically on upload. `processing` marks that a worker has
+/// picked the job up.
 enum ParseStatus: String, Codable, Sendable {
+    case uploaded
     case pending
     case processing
     case done

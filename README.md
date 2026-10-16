@@ -25,7 +25,7 @@ swift run Healthside serve
 
 The server listens on `http://localhost:8080`. `swift run`/`swift build` pick up `.env` automatically (Vapor's `DotEnv`).
 
-Without `REDIS_URL` the queue isn't configured: uploads still succeed but stay `pending`. Use `POST /documents/:id/extract` to parse manually.
+Uploading a file only saves it (`status: uploaded`) — it never queues extraction on its own. Call `POST /documents/:id/extract` explicitly to parse it (the client's "AI check" action). Without `REDIS_URL` that call runs inline and blocks the request instead of queuing a background job.
 
 ## Docker
 

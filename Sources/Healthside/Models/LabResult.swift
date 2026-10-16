@@ -75,7 +75,9 @@ final class LabResult: Model, @unchecked Sendable {
         self.fileSize = fileSize
         self.checksumSha256 = checksumSha256
         self.label = label
-        self.parseStatus = .pending
+        // Upload no longer starts extraction on its own — see R-Files. The
+        // client requests it explicitly via POST /documents/:id/extract.
+        self.parseStatus = .uploaded
     }
 
     func toResponse() throws -> LabResultResponse {
